@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import sys
+from pathlib import Path
 
 import yaml
 
@@ -133,6 +135,17 @@ def cmd_run(args):
         sys.exit(code)
 
 
+def cmd_mcp(args):
+    """Run the MCP server over stdio: the agent-facing surface."""
+    if importlib.util.find_spec("mcp") is None:
+        print('pip install "certainlyscraped[mcp]"', file=sys.stderr)
+        sys.exit(EXIT_ERROR)
+    from .mcp_server import build_server
+
+    workdir = Path(args.workdir) if args.workdir else Path.cwd()
+    build_server(workdir, allow_private=args.allow_private).run("stdio")
+
+
 def _format_for(path: str, cfg: dict) -> str:
     ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
     return ext if ext in ("csv", "json", "jsonl") else cfg.get("output", "csv")
@@ -216,6 +229,19 @@ def main(argv=None):
     p_verify.add_argument("--min-rows", type=int, default=1)
     p_verify.add_argument("--sample", type=int, default=3)
     p_verify.set_defaults(func=cmd_verify)
+
+    p_mcp = sub.add_parser(
+        "mcp", help="run the MCP server over stdio (for AI agents)",
+        description="Serve probe/init/try_selector/scrape over MCP (stdio). "
+                    "Private addresses are refused and configs are inline "
+                    "YAML/JSON text only.")
+    p_mcp.add_argument("--allow-private", action="store_true",
+                       help="allow loopback and private-range targets "
+                            "(local development; never the default)")
+    p_mcp.add_argument("--workdir", metavar="DIR", default=None,
+                       help="directory the dataset files go under "
+                            "(default: the current directory)")
+    p_mcp.set_defaults(func=cmd_mcp)
 
     args = p.parse_args(argv)
     args.func(args)
