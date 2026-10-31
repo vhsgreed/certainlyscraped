@@ -106,7 +106,7 @@ def test_probe_refuses_file_url(tmp_path):
 def test_scrape_rejects_refused_key(tmp_path):
     seen = {}
 
-    def fake_scrape(cfg, *, guard=None, log=None):
+    def fake_scrape(cfg, *, guard=None, log=None, **kwargs):
         seen["cfg"] = cfg
         return FakeResult([{"a": 1}])
 
@@ -121,8 +121,8 @@ def test_scrape_rejects_refused_key(tmp_path):
 
 
 def test_scrape_rejects_unknown_key(tmp_path):
-    def fake_scrape(cfg, *, guard=None, log=None):  # pragma: no cover
-        raise AssertionError("must not run")
+    def fake_scrape(cfg, *, guard=None, log=None, **kwargs):  # pragma: no cover
+        raise RuntimeError("must not run")
 
     cfg = ("url: https://example.com/books\n"
            "since: yesterday.csv\n"
@@ -136,7 +136,7 @@ def test_scrape_rejects_unknown_key(tmp_path):
 def test_scrape_clamps_tier(tmp_path):
     seen = {}
 
-    def fake_scrape(cfg, *, guard=None, log=None):
+    def fake_scrape(cfg, *, guard=None, log=None, **kwargs):
         seen["cfg"] = cfg
         return FakeResult([{"a": 1}])
 
@@ -151,8 +151,8 @@ def test_scrape_clamps_tier(tmp_path):
 
 
 def test_scrape_rejects_non_http_url(tmp_path):
-    def fake_scrape(cfg, *, guard=None, log=None):  # pragma: no cover
-        raise AssertionError("must not run")
+    def fake_scrape(cfg, *, guard=None, log=None, **kwargs):  # pragma: no cover
+        raise RuntimeError("must not run")
 
     res, _ = call(build_server(tmp_path, _scrape=fake_scrape), "scrape",
                   {"config": "url: /etc/passwd\nitems: {selector: li}\n"})
@@ -161,8 +161,8 @@ def test_scrape_rejects_non_http_url(tmp_path):
 
 
 def test_scrape_rejects_non_mapping_config(tmp_path):
-    def fake_scrape(cfg, *, guard=None, log=None):  # pragma: no cover
-        raise AssertionError("must not run")
+    def fake_scrape(cfg, *, guard=None, log=None, **kwargs):  # pragma: no cover
+        raise RuntimeError("must not run")
 
     res, _ = call(build_server(tmp_path, _scrape=fake_scrape), "scrape",
                   {"config": "- just\n- a list\n"})
@@ -176,7 +176,7 @@ def test_scrape_writes_dataset_and_truncates(tmp_path):
     rows = [{"title": f"book {i}"} for i in range(7)]
     seen = {}
 
-    def fake_scrape(cfg, *, guard=None, log=None):
+    def fake_scrape(cfg, *, guard=None, log=None, **kwargs):
         seen["log"] = log
         return FakeResult(rows)
 
@@ -201,7 +201,7 @@ def test_scrape_writes_dataset_and_truncates(tmp_path):
 def test_scrape_does_not_truncate_without_need(tmp_path):
     rows = [{"i": i} for i in range(4)]
 
-    def fake_scrape(cfg, *, guard=None, log=None):
+    def fake_scrape(cfg, *, guard=None, log=None, **kwargs):
         return FakeResult(rows)
 
     res, _ = call(build_server(tmp_path, _scrape=fake_scrape), "scrape",
@@ -214,7 +214,7 @@ def test_scrape_does_not_truncate_without_need(tmp_path):
 def test_scrape_caps_max_rows(tmp_path):
     rows = [{"i": i} for i in range(3)]
 
-    def fake_scrape(cfg, *, guard=None, log=None):
+    def fake_scrape(cfg, *, guard=None, log=None, **kwargs):
         return FakeResult(rows)
 
     res, _ = call(build_server(tmp_path, _scrape=fake_scrape), "scrape",
@@ -228,7 +228,7 @@ def test_scrape_caps_max_rows(tmp_path):
 def test_scrape_caps_max_pages(tmp_path):
     seen = {}
 
-    def fake_scrape(cfg, *, guard=None, log=None):
+    def fake_scrape(cfg, *, guard=None, log=None, **kwargs):
         seen["cfg"] = cfg
         return FakeResult([{"i": 0}])
 
@@ -374,7 +374,7 @@ def test_stdio_server_roundtrip(tmp_path):
 # -- 8. numeric config is bounded before the first fetch (R15) --------------
 
 def _recording_scraper(seen):
-    def fake_scrape(cfg, *, guard=None, log=None):
+    def fake_scrape(cfg, *, guard=None, log=None, **kwargs):
         seen["cfg"] = dict(cfg)
         return FakeResult([{"i": 0}])
     return fake_scrape
@@ -455,7 +455,7 @@ def test_timeout_is_clamped_into_range(tmp_path):
 @pytest.mark.parametrize("key", ["items", "fields", "paginate"])
 def test_non_mapping_blocks_are_refused_before_any_fetch(tmp_path, key):
     def boom(cfg, **kw):  # pragma: no cover
-        raise AssertionError("must not run")
+        raise RuntimeError("must not run")
 
     res, raw = call(build_server(tmp_path, _scrape=boom), "scrape",
                     {"config": "url: https://example.com/x\n"
@@ -468,7 +468,7 @@ def test_non_mapping_blocks_are_refused_before_any_fetch(tmp_path, key):
 
 def test_paginate_must_be_a_mapping_before_any_fetch(tmp_path):
     def boom(cfg, **kw):  # pragma: no cover
-        raise AssertionError("must not run")
+        raise RuntimeError("must not run")
 
     res, raw = call(build_server(tmp_path, _scrape=boom), "scrape",
                     {"config": "url: https://example.com/x\n"
@@ -483,7 +483,7 @@ def test_paginate_must_be_a_mapping_before_any_fetch(tmp_path):
 
 def test_scrape_non_string_config_is_a_status_dict(tmp_path):
     def boom(cfg, **kw):  # pragma: no cover
-        raise AssertionError("must not run")
+        raise RuntimeError("must not run")
 
     res, raw = call(build_server(tmp_path, _scrape=boom), "scrape",
                     {"config": 123})
@@ -526,7 +526,7 @@ def test_scrape_non_numeric_max_rows_uses_the_default(tmp_path):
     rows = [{"i": i} for i in range(60)]
     seen = {}
 
-    def fake_scrape(cfg, *, guard=None, log=None):
+    def fake_scrape(cfg, *, guard=None, log=None, **kwargs):
         seen["cfg"] = cfg
         return FakeResult(rows)
 
@@ -562,7 +562,7 @@ def _api_with_pages(html, seen: dict):
                          f"<a title='{url}' href='{url}'>x</a></h3></article>")
         return 200, html
 
-    def fake_scrape(cfg, *, guard=None, log=None):
+    def fake_scrape(cfg, *, guard=None, log=None, **kwargs):
         seen["cfg"] = dict(cfg)
         return api_scrape(cfg, fetcher=fetcher, log=None)
 
@@ -631,7 +631,7 @@ def test_pages_range_is_capped_with_a_note(tmp_path):
 ])
 def test_malformed_pages_is_a_status_dict(tmp_path, pages):
     def boom(cfg, **kw):  # pragma: no cover
-        raise AssertionError("must not run")
+        raise RuntimeError("must not run")
 
     res, raw = call(build_server(tmp_path, _scrape=boom), "scrape",
                     {"config": f"pages: {pages}\n" + BOOKS_CFG})
@@ -654,7 +654,7 @@ def test_urls_are_capped_with_a_note(tmp_path):
     urls = [f"https://example.com/{i}" for i in range(150)]
     seen = {}
 
-    def fake_scrape(cfg, *, guard=None, log=None):
+    def fake_scrape(cfg, *, guard=None, log=None, **kwargs):
         seen["cfg"] = dict(cfg)
         return FakeResult([{"i": 0}])
 
@@ -677,7 +677,7 @@ def test_urls_are_capped_with_a_note(tmp_path):
 ])
 def test_urls_relative_or_non_string_entry_is_refused(tmp_path, entry, needle):
     def boom(cfg, **kw):  # pragma: no cover
-        raise AssertionError("must not run")
+        raise RuntimeError("must not run")
 
     raw_yaml = ("urls:\n"
                 "  - 'https://example.com/a'\n"
@@ -694,7 +694,7 @@ def test_urls_relative_or_non_string_entry_is_refused(tmp_path, entry, needle):
 
 def test_urls_empty_is_refused(tmp_path):
     def boom(cfg, **kw):  # pragma: no cover
-        raise AssertionError("must not run")
+        raise RuntimeError("must not run")
 
     res, raw = call(build_server(tmp_path, _scrape=boom), "scrape",
                     {"config": "urls: []\n" + BOOKS_CFG})
@@ -705,7 +705,7 @@ def test_urls_empty_is_refused(tmp_path):
 
 def test_two_page_sources_are_refused_before_any_fetch(tmp_path):
     def boom(cfg, **kw):  # pragma: no cover
-        raise AssertionError("must not run")
+        raise RuntimeError("must not run")
 
     res, raw = call(build_server(tmp_path, _scrape=boom), "scrape",
                     {"config": "pages: {template: 'https://e.com/{n}', to: 2}\n"
@@ -813,7 +813,7 @@ def test_per_proxy_rate_sec_is_bounded(tmp_path):
 @pytest.mark.parametrize("key", ["proxy", "proxies", "cookies"])
 def test_server_side_keys_stay_refused_alongside_pages(tmp_path, key):
     def boom(cfg, **kw):  # pragma: no cover
-        raise AssertionError("must not run")
+        raise RuntimeError("must not run")
 
     res, raw = call(build_server(tmp_path, _scrape=boom), "scrape",
                     {"config": "pages: {template: 'https://e.com/{n}', to: 2}\n"
@@ -821,3 +821,193 @@ def test_server_side_keys_stay_refused_alongside_pages(tmp_path, key):
     assert not raw.is_error
     assert res["status"] == "error"
     assert any(key in n for n in res["notes"])
+
+
+# -- 11. fix round A: the server's own pool and the env (C1/R40, I1/R41) ----
+
+ITEM_CFG = ("url: https://example.com/list\ntier: 1\n"
+            "items: {selector: div.item}\n"
+            "fields: {title: {selector: a}}\n")
+ITEM_HTML = ("<html><body><div class='item'><a href='/x'>x</a></div>"
+             "</body></html>")
+
+
+def _fake_api_fetch(monkeypatch, fn):
+    import certainlyscraped.api as api_mod
+    monkeypatch.setattr(api_mod, "_fetch", fn)
+
+
+def test_mcp_scrape_never_reads_the_env_proxy(monkeypatch, tmp_path):
+    """I1/R41: `mcp` without --proxies has no pool, even with the env set."""
+    calls = []
+
+    def fake_fetch(url, tier, **kwargs):
+        calls.append((tier, kwargs.get("proxy")))
+        return 200, ITEM_HTML
+
+    _fake_api_fetch(monkeypatch, fake_fetch)
+    monkeypatch.setenv("CERTAINLYSCRAPED_PROXIES", "http://127.0.0.1:18082")
+    res, raw = call(build_server(tmp_path), "scrape", {"config": ITEM_CFG})
+    assert not raw.is_error
+    assert [s for page in res["pages"] for s in page["steps"]] == ["t1"]
+    assert calls and all(proxy is None for _, proxy in calls)
+
+
+def test_mcp_scrape_passes_use_env_false(tmp_path):
+    seen = {}
+
+    def fake_scrape(cfg, **kwargs):
+        seen.update(kwargs)
+        return FakeResult([{"i": 0}])
+
+    call(build_server(tmp_path, _scrape=fake_scrape), "scrape",
+         {"config": ITEM_CFG})
+    assert seen.get("use_env") is False
+
+
+def test_mcp_probe_leases_a_proxy_from_the_server_pool(tmp_path):
+    from certainlyscraped.proxypool import ProxyPool
+
+    pool = ProxyPool.from_config(
+        {"proxies": ["http://10.1.2.3:8000 # p"]}, env={})
+    seen = {}
+
+    class Result:
+        tier = 1
+        confident = True
+        note = "static page"
+        body_size = 10
+        markers = []
+        embedded = []
+
+    def fake_probe(url, guard=None, proxy=None):
+        seen["proxy"] = proxy
+        return Result()
+
+    res, _ = call(build_server(tmp_path, pool=pool, _probe=fake_probe),
+                  "probe", {"url": "https://example.com/x"})
+    assert res["status"] == "ok"
+    assert seen["proxy"] is not None
+    assert seen["proxy"].url == "http://10.1.2.3:8000"
+
+
+class _EmptyPool:
+    def acquire(self, host):
+        return None
+
+
+@pytest.mark.parametrize("name,args", [
+    ("probe", {"url": "https://example.com/x"}),
+    ("init", {"url": "https://example.com/x"}),
+    ("try_selector", {"url": "https://example.com/x", "selector": "a"}),
+])
+def test_mcp_page_tools_without_a_lease_are_blocked(tmp_path, name, args):
+    """R40: a pool is never bypassed, and no lease means no request."""
+    calls = []
+
+    def tool_impl(*a, **kw):
+        calls.append(1)  # pragma: no cover - must never run
+        raise RuntimeError("fetched without a lease")
+
+    server = build_server(tmp_path, pool=_EmptyPool(),
+                          _probe=tool_impl, _load_page=tool_impl)
+    res, raw = call(server, name, args)
+    assert not raw.is_error
+    assert res["status"] == "blocked"
+    note = res.get("note") or notes(res)
+    assert "no proxy available for example.com" in note
+    assert calls == []
+
+
+# -- 12. I3/R43: a guard error keeps its rung under MCP --------------------
+
+def _scrape_raising(monkeypatch, tmp_path, exc):
+    def fake_fetch(url, tier, **kwargs):
+        raise exc
+
+    _fake_api_fetch(monkeypatch, fake_fetch)
+    return call(build_server(tmp_path), "scrape", {"config": ITEM_CFG})
+
+
+def test_mcp_private_address_refusal_is_terminal_but_keeps_the_rung(
+        monkeypatch, tmp_path):
+    from certainlyscraped.netguard import PrivateAddressError
+
+    res, raw = _scrape_raising(
+        monkeypatch, tmp_path, PrivateAddressError("private address: 10.0.0.1"))
+    assert not raw.is_error
+    page = res["pages"][0]
+    assert page["attempts"] == 1 == len(page["steps"])
+    assert page["steps"] == ["t1"]
+    assert "PrivateAddressError" in page["note"]
+
+
+def test_mcp_cannot_resolve_is_an_ordinary_error_with_steps(
+        monkeypatch, tmp_path):
+    res, raw = _scrape_raising(
+        monkeypatch, tmp_path, ValueError("cannot resolve no-such-host.invalid"))
+    assert not raw.is_error
+    page = res["pages"][0]
+    assert page["steps"] == ["t1", "t1", "t2", "t2"]
+    assert page["attempts"] == 4 == len(page["steps"])
+    assert "cannot resolve" in page["note"]
+
+
+# -- 13. mutation 12: an ordinary exception never escapes a tool ------------
+
+def test_scrape_internal_exception_is_a_status_dict(tmp_path):
+    def boom(cfg, **kw):
+        raise RuntimeError("kaboom")
+
+    res, raw = call(build_server(tmp_path, _scrape=boom), "scrape",
+                    {"config": ITEM_CFG})
+    assert not raw.is_error
+    assert res["status"] == "error"
+    assert "RuntimeError: kaboom" in notes(res)
+
+
+# -- 14. cheap fixes: min_rows note, within type, allow-list ----------------
+
+def test_min_rows_coercion_note_is_kept(tmp_path):
+    res, raw, cfg, _ = _scrape_with(tmp_path, ITEM_CFG, min_rows="abc")
+    assert not raw.is_error
+    assert res["status"] == "complete"
+    assert any("min_rows" in n for n in res["notes"])
+
+
+def test_try_selector_with_within_not_a_string_is_readable(tmp_path):
+    server = build_server(tmp_path, _load_page=fake_load_page)
+    res, raw = call(server, "try_selector",
+                    {"url": "https://example.com/books",
+                     "selector": "h3 a", "within": 5})
+    assert not raw.is_error
+    assert res["status"] == "error"
+    assert any("within" in hint and "string" in hint
+               for hint in res["hints"])
+
+
+@pytest.mark.parametrize("key", ["json", "headers"])
+def test_dead_config_keys_are_now_unknown(tmp_path, key):
+    """R46: neither key is read, so neither may be accepted."""
+    def boom(cfg, **kw):  # pragma: no cover
+        raise RuntimeError("must not run")
+
+    res, raw = call(build_server(tmp_path, _scrape=boom), "scrape",
+                    {"config": ITEM_CFG + f"{key}: 'oops'\n"})
+    assert not raw.is_error
+    assert res["status"] == "error"
+    assert any(f"unknown config key '{key}'" in n for n in res["notes"])
+
+
+def test_scrape_description_lists_neither_json_nor_headers(tmp_path):
+    async def go():
+        async with Client(build_server(tmp_path)) as c:
+            return await c.list_tools()
+
+    tools = {t.name: t for t in run(go()).tools}
+    text = tools["scrape"].description or ""
+    assert "headers" not in text
+    assert "json," not in text
+    assert "json" not in ALLOWED_CONFIG_KEYS
+    assert "headers" not in ALLOWED_CONFIG_KEYS
+

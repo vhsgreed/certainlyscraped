@@ -16,6 +16,7 @@ import pytest
 import certainlyscraped.api as api
 import certainlyscraped.escalate as escalate
 from certainlyscraped.escalate import Ladder
+from certainlyscraped.fetch import FetchError
 from certainlyscraped.fetch import fetch as real_fetch
 from certainlyscraped.outcome import PageFetch, classify_fetch
 from certainlyscraped.runner import RateGate
@@ -898,3 +899,294 @@ def test_a_pool_with_only_the_documented_report_signature_works():
     page = ladder.fetch_page("https://h.test/1")
     assert page.status == 200
     assert pool.reports == [("a", "h.test", "ok")]
+
+
+# --- fix round A: I2 -- a transport failure keeps its reason --------------
+
+
+def _ladder_with(fetch_fn, *, cfg=None, pool=None, clock=None, log=None):
+    clock = clock or FakeClock()
+    conf = {"max_retries": 3, "rate_limit_sec": 0, "cooldown_sec": 300}
+    conf.update(cfg or {})
+    return Ladder(conf, 1, pool=pool, fetch_fn=fetch_fn, sleep=clock.sleep,
+                  log=log, gate=RateGate(0, clock=clock.clock,
+                                         sleep=clock.sleep))
+
+
+def test_final_transport_error_note_is_the_error_text():
+    """I2/R42: a page that ends without a response says why."""
+    def fetch_fn(url, tier, **kwargs):
+        raise FetchError("ProxyError: all connection attempts failed")
+
+    ladder = _ladder_with(fetch_fn, cfg={"max_retries": 1, "max_tier": 2})
+    page = ladder.fetch_page("https://h.test/1")
+    assert page.status == 0
+    assert page.note == "ProxyError: all connection attempts failed"
+    assert classify_fetch("https://h.test/1", page.status,
+                         page.html).outcome == "error"
+
+
+def test_transport_failures_are_distinguishable():
+    """I2: a dead proxy and a DNS failure are not both 'max_tier 2 reached'."""
+    def page_for(message):
+        def fetch_fn(url, tier, **kwargs):
+            raise FetchError(message)
+        return _ladder_with(fetch_fn).fetch_page("https://h.test/1")
+
+    dead = page_for("ProxyError: cannot connect to proxy")
+    dns = page_for("ConnectError: Name or service not known")
+    assert "ProxyError" in dead.note
+    assert "ConnectError" in dns.note
+    assert dead.note != dns.note
+
+
+def test_transport_error_note_is_scrubbed():
+    from certainlyscraped.fetch import FetchError
+
+    pool = ProxyPool.from_config(
+        {"proxies": ["http://u:s3cret@10.1.2.3:8000 # a"]}, env={},
+        allow_userinfo=True)
+
+    def fetch_fn(url, tier, **kwargs):
+        raise FetchError(f"ProxyError: {kwargs['proxy']} refused")
+
+    ladder = _ladder_with(fetch_fn, cfg={"max_retries": 0}, pool=pool)
+    page = ladder.fetch_page("https://h.test/1")
+    assert "s3cret" not in page.note
+    assert "10.1.2.3" not in page.note
+    assert "***" in page.note
+
+
+# --- fix round A: I3 -- guard errors stay inside the ladder ---------------
+
+
+def test_private_address_error_is_terminal_and_keeps_the_rung():
+    from certainlyscraped.netguard import PrivateAddressError
+
+    def fetch_fn(url, tier, **kwargs):
+        raise PrivateAddressError("private address: 10.0.0.1")
+
+    ladder = _ladder_with(fetch_fn)
+    page = ladder.fetch_page("https://h.test/1")
+    assert classify_fetch("https://h.test/1", page.status,
+                         page.html).outcome == "error"
+    assert page.status == 0
+    assert page.attempts == 1 == len(page.steps)
+    assert page.steps == ["t1"]
+    assert "PrivateAddressError" in page.note
+    assert "10.0.0.1" in page.note
+
+
+def test_cannot_resolve_is_a_normal_status_zero_error():
+    def fetch_fn(url, tier, **kwargs):
+        raise ValueError("cannot resolve no-such-host.invalid")
+
+    ladder = _ladder_with(fetch_fn)
+    page = ladder.fetch_page("https://h.test/1")
+    assert classify_fetch("https://h.test/1", page.status,
+                         page.html).outcome == "error"
+    assert page.steps == ["t1", "t1", "t2", "t2"]
+    assert page.attempts == 4 == len(page.steps)
+    assert "cannot resolve" in page.note
+
+
+@pytest.mark.parametrize("case", ["ok", "not_found", "blocked",
+                                  "rate_limited", "error", "no_proxy",
+                                  "private", "unresolvable"])
+def test_attempts_always_equals_the_number_of_steps(case):
+    """R43 invariant: every path that ends a page reports a coherent trail."""
+    if case == "ok":
+        ladder, _, _ = make([(200, OK)])
+        page = ladder.fetch_page("https://h.test/1")
+    elif case == "not_found":
+        ladder, _, _ = make([(404, "")])
+        page = ladder.fetch_page("https://h.test/1")
+    elif case == "blocked":
+        ladder, _, _ = make([(403, CHALLENGE)])
+        page = ladder.fetch_page("https://h.test/1")
+    elif case == "rate_limited":
+        ladder, _, _ = make([(429, "")])
+        page = ladder.fetch_page("https://h.test/1")
+    elif case == "error":
+        ladder, _, _ = make([(502, "bad gateway")])
+        page = ladder.fetch_page("https://h.test/1")
+    elif case == "no_proxy":
+        pool, _ = pool_for(["http://a:1 # a"])
+        pool.report("http://a:1", "h.test", "blocked")
+        ladder, _, _ = make([(200, OK)], pool=pool)
+        page = ladder.fetch_page("https://h.test/1")
+    elif case == "private":
+        from certainlyscraped.netguard import PrivateAddressError
+
+        def fetch_fn(url, tier, **kwargs):
+            raise PrivateAddressError("private address: 10.0.0.1")
+
+        page = _ladder_with(fetch_fn).fetch_page("https://h.test/1")
+    else:
+        def fetch_fn(url, tier, **kwargs):
+            raise ValueError("cannot resolve no-such-host.invalid")
+
+        page = _ladder_with(fetch_fn).fetch_page("https://h.test/1")
+    assert page.attempts == len(page.steps)
+
+
+# --- fix round A: I4 -- pacing is per proxy, not per group ----------------
+
+
+class ThreadSafeClock(FakeClock):
+    """A fake clock the pool's worker threads can share."""
+
+    def __init__(self):
+        super().__init__()
+        self._lock = threading.Lock()
+
+    def clock(self):
+        with self._lock:
+            return self.t
+
+    def sleep(self, seconds):
+        with self._lock:
+            self.sleeps.append(seconds)
+            self.t += seconds
+
+
+def test_pacing_is_per_proxy_not_per_group():
+    """I4/R44: four proxies in one /16 give four pacing slots, not one."""
+    from certainlyscraped.runner import run_parallel
+
+    pool, _ = pool_for([f"http://10.1.0.{i}:8000" for i in range(1, 5)])
+    # one rotation group ("net-1"), four endpoints: the case that used to
+    # share a single pacing slot.
+    clock = ThreadSafeClock()
+
+    def fetch_fn(url, tier, **kwargs):
+        return 200, OK
+
+    ladder = Ladder({"concurrency": 4, "rate_limit_sec": 1.0}, 1, pool=pool,
+                    fetch_fn=fetch_fn, sleep=clock.sleep,
+                    gate=RateGate(1.0, clock=clock.clock, sleep=clock.sleep))
+    urls = [f"https://site.example/p{i}" for i in range(8)]
+    run_parallel(ladder.fetch_page, urls,
+                 {"concurrency": 4, "rate_limit_sec": 0},
+                 lambda html, url: 1, gate=None)
+    # Eight pages over four one-second slots is one second of pacing; one
+    # shared group slot would be seven.
+    assert 0.9 <= clock.t <= 2.0, clock.t
+
+
+# --- fix round A: I5 -- a dead proxy fails over ---------------------------
+
+
+def test_a_fetch_error_tries_another_group_before_the_same_tier_retry():
+    pool, _ = pool_for(["http://a:1 # a", "http://b:1 # b"])
+    calls = []
+
+    def fetch_fn(url, tier, **kwargs):
+        calls.append((tier, kwargs.get("proxy")))
+        if kwargs.get("proxy") == "http://a:1":
+            raise FetchError("ConnectError: connection refused")
+        return 200, OK
+
+    ladder = _ladder_with(fetch_fn, pool=pool)
+    page = ladder.fetch_page("https://h.test/1")
+    assert page.steps == ["t1@a", "t1@b"]
+    assert page.attempts == 2
+    assert page.status == 200
+    assert calls == [(1, "http://a:1"), (1, "http://b:1")]
+    # The tier came from failover, not from a climb: it is not remembered.
+    assert ladder.level("h.test") == 1
+
+
+def test_a_5xx_response_still_keeps_the_lease():
+    """R45: a response (unlike a FetchError) is the tier's problem."""
+    pool, _ = pool_for(["http://a:1 # a", "http://b:1 # b"])
+    calls = []
+
+    def fetch_fn(url, tier, **kwargs):
+        calls.append((tier, kwargs.get("proxy")))
+        return 500, "server error"
+
+    ladder = _ladder_with(fetch_fn, pool=pool,
+                          cfg={"max_retries": 3, "max_tier": 2})
+    page = ladder.fetch_page("https://h.test/1")
+    assert page.steps == ["t1@a", "t1@a", "t2@a", "t2@a"]
+    assert {proxy for _, proxy in calls} == {"http://a:1"}
+
+
+# --- fix round A: R46 -- backoff and group switches are visible -----------
+
+
+def test_backoff_is_logged_through_the_scrubbing_log(monkeypatch):
+    import io
+
+    calls = []
+
+    def fake_fetch(url, tier, **kwargs):
+        calls.append(kwargs.get("proxy"))
+        if len(calls) == 1:
+            return 429, "", {}
+        return 200, OK, {}
+
+    monkeypatch.setattr(api, "_fetch", fake_fetch)
+    cfg = {"tier": 1, "rate_limit_sec": 0, "cooldown_sec": 0.05,
+           "max_retries": 1,
+           "url": "https://h.test/1", "urls": ["https://h.test/1"],
+           "proxies": ["http://u:s3cret@10.1.2.3:8000 # a"],
+           "items": {"selector": "li"},
+           "fields": {"t": {"selector": "a"}}}
+    log = io.StringIO()
+    api.scrape(cfg, log=log, proxies_from_file=True)
+    text = log.getvalue()
+    assert "[ladder] h.test: rate limited, waiting 0.05s" in text
+    assert "10.1.2.3" not in text and "s3cret" not in text
+
+
+def test_group_switch_is_logged_through_the_scrubbing_log(monkeypatch):
+    import io
+
+    calls = []
+
+    def fake_fetch(url, tier, **kwargs):
+        calls.append(kwargs.get("proxy"))
+        if len(calls) == 1:
+            return 429, "", {}
+        return 200, OK, {}
+
+    monkeypatch.setattr(api, "_fetch", fake_fetch)
+    cfg = {"tier": 1, "rate_limit_sec": 0,
+           "url": "https://h.test/1", "urls": ["https://h.test/1"],
+           "proxies": ["http://u:s3cret@10.1.2.3:8000 # a",
+                       "http://10.9.9.9:8000 # b"],
+           "items": {"selector": "li"},
+           "fields": {"t": {"selector": "a"}}}
+    log = io.StringIO()
+    api.scrape(cfg, log=log, proxies_from_file=True)
+    text = log.getvalue()
+    assert "[ladder] h.test: rate limited, trying another proxy group" in text
+    assert "10.1.2.3" not in text and "s3cret" not in text
+
+
+def test_steps_and_proxy_group_carry_no_hostname_or_prefix():
+    """R46: a hostname proxy and two IPv4 proxies stay anonymous in the trail."""
+    pool, _ = pool_for(["http://squid.internal.corp:3128",
+                        "http://10.1.2.3:8000", "http://10.2.3.4:8000"])
+    ladder, _, _ = make([(200, OK)], pool=pool)
+    page = ladder.fetch_page("https://h.test/1")
+    assert page.steps == ["t1@net-1"]
+    assert page.proxy_group == "net-1"
+    for text in page.steps + [page.proxy_group]:
+        assert "squid" not in text and "10." not in text
+        assert "/" not in text
+
+
+# --- fix round A: R34 is verified end to end ------------------------------
+
+
+def test_a_challenge_is_reported_to_the_pool_with_challenge_true():
+    """Mutation 22: the ladder passes challenge= to pool.report."""
+    pool = FakePool(["a"])
+    ladder, _, _ = make([(403, CHALLENGE), (200, OK)], pool=pool)
+    ladder.fetch_page("https://h.test/1")
+    assert [report[0] for report in pool.reports] == ["a", "a"]
+    assert pool.reports[0][2] == "blocked"
+    assert pool.reports[0][3] is True

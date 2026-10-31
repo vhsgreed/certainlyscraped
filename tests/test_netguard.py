@@ -56,6 +56,9 @@ REFUSED = [
     "http://[::1]/",
     "http://[fd00::1]/",
     "http://[::ffff:127.0.0.1]/",
+    # IPv4-mapped IPv6 in CGNAT space: ipaddress does not treat this as
+    # private on its own, so it needs the v4_mapped recursion (mutation 4a).
+    "http://[::ffff:100.64.0.1]/",
     "http://0.0.0.0/",
 ]
 

@@ -91,10 +91,87 @@ def test_run_since_with_rolling_snapshot(tmp_path, capsys):
 def test_since_empty_delta_still_exits_zero(tmp_path):
     cfg = _write_cfg(tmp_path)
     state = str(tmp_path / "state.csv")
-    argv = ["run", cfg, "--out", str(tmp_path / "d.csv"), "--since", state,
+    delta = tmp_path / "d.csv"
+    argv = ["run", cfg, "--out", str(delta), "--since", state,
             "--snapshot", state]
     cli.main(argv)
+    assert len(delta.read_text().splitlines()) == 3   # one JSONL row each
     cli.main(argv)  # nothing changed: 0 rows out, but scrape verified OK
+    # The second run wrote the empty delta and left the snapshot intact.
+    assert delta.read_text() == ""
+    with open(state) as f:
+        assert len(list(csv.DictReader(f))) == 3
+
+
+def test_a_trailing_not_found_does_not_make_the_run_incomplete(
+        tmp_path, monkeypatch):
+    """Mutation 11: a 404 that ends a range is a normal end, not a failure."""
+    import certainlyscraped.api as api_mod
+
+    def fake_fetch(url, tier, **kwargs):
+        number = int(url.rsplit("=", 1)[-1])
+        page = (f'<html><body><div class="p"><a href="/{number}">'
+                f"Item {number}</a></div></body></html>")
+        return (200, page) if number <= 2 else (404, "")
+
+    monkeypatch.setattr(api_mod, "_fetch", fake_fetch)
+    cfg = {"url": "https://shop.test/p=1", "tier": 1, "rate_limit_sec": 0,
+           "pages": {"template": "https://shop.test/p={n}",
+                     "from": 1, "to": 5},
+           "items": {"selector": "div.p"},
+           "fields": {"title": {"selector": "a"}}}
+    res = scrape(cfg, log=None)
+    assert [o.outcome for o in res.page_report] == \
+        ["ok", "ok", "not_found", "not_found"]
+    assert res.status() == "complete"
+
+    path = tmp_path / "c.json"
+    path.write_text(json.dumps(cfg))
+    # Exit 0: no SystemExit from main().
+    cli.main(["run", str(path), "--out", str(tmp_path / "o.csv")])
+
+
+def test_a_dead_proxy_group_fails_over_and_the_run_exits_zero(
+        tmp_path, monkeypatch):
+    """I5/R45: page 1 moves from the dead group to the healthy one at t1,
+    later pages start at t1 (no sticky climb), and the run succeeds."""
+    import certainlyscraped.api as api_mod
+    from certainlyscraped.fetch import FetchError
+
+    def fake_fetch(url, tier, **kwargs):
+        if kwargs.get("proxy") == "http://a:1":
+            raise FetchError("ConnectError: connection refused")
+        return 200, PAGE1
+
+    monkeypatch.setattr(api_mod, "_fetch", fake_fetch)
+    cfg = {"url": "https://x.test/p1", "tier": 1, "rate_limit_sec": 0,
+           "urls": [f"https://x.test/p{i}" for i in (1, 2, 3)],
+           "proxies": ["http://a:1 # a", "http://b:2 # b"],
+           "items": {"selector": "div.p"},
+           "fields": {"title": {"selector": "a"}}}
+    path = tmp_path / "c.json"
+    path.write_text(json.dumps(cfg))
+    report = tmp_path / "report.jsonl"
+    # Exit 0: main() returns instead of raising SystemExit.
+    cli.main(["run", str(path), "--out", str(tmp_path / "o.csv"),
+              "--report", str(report)])
+    pages = [json.loads(line) for line in report.read_text().splitlines()]
+    assert pages[0]["steps"] == ["t1@a", "t1@b"]
+    assert pages[0]["outcome"] == "ok"
+    assert [page["steps"][0] for page in pages[1:]] == ["t1@b", "t1@b"]
+    assert not any(step.startswith("t2") for page in pages
+                   for step in page["steps"])
+
+
+def test_rows_are_deduplicated_across_pages():
+    """Mutation 14: the same item on two pages is one row."""
+    page = ('<html><body><div class="p"><a href="/a">Alpha</a></div>'
+            "</body></html>")
+    cfg = {key: value for key, value in CFG.items() if key != "paginate"}
+    cfg["urls"] = ["https://shop.test/a.html", "https://shop.test/b.html"]
+
+    res = scrape(cfg, fetcher=lambda url: (200, page), log=None)
+    assert [row["title"] for row in res.rows] == ["Alpha"]
 
 
 def test_broken_selector_still_fails_with_since(tmp_path):

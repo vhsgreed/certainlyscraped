@@ -59,17 +59,35 @@ class FakeClock:
 # --- groups ---------------------------------------------------------------
 
 def test_groups_from_labels_and_prefixes():
+    # R46: an unlabelled proxy's group is a neutral "net-N"; no address or
+    # network leaks into the label. User labels are kept as written.
     pool = ProxyPool.from_config({"proxies": LINES}, env={})
-    assert pool.groups() == ["dc-a", "10.1/16", "10.2/16",
-                             "2001:db8:1::/48", "proxy.example"]
+    assert pool.groups() == ["dc-a", "net-1", "net-2", "net-3", "net-4"]
     assert pool.acquire("a.com").url == "http://10.1.2.4:8000"
 
 
 def test_groups_from_a_proxies_file():
     pool = ProxyPool.from_config(
         {"proxies": {"list": "proxies.txt"}}, env={}, base_dir=FIX)
-    assert pool.groups() == ["dc-a", "10.1/16", "10.2/16",
-                             "2001:db8:1::/48", "proxy.example"]
+    assert pool.groups() == ["dc-a", "net-1", "net-2", "net-3", "net-4"]
+
+
+def test_derived_group_labels_are_neutral():
+    """R46: no hostname and no /16 reaches steps or proxy_group."""
+    pool = ProxyPool.from_config(
+        {"proxies": ["http://squid.internal.corp:3128",
+                     "http://10.1.2.3:8000",
+                     "http://10.2.3.4:8000"]}, env={})
+    assert pool.groups() == ["net-1", "net-2", "net-3"]
+    for label in pool.groups():
+        assert "squid" not in label and "10." not in label
+        assert "/" not in label
+
+
+def test_user_group_labels_are_kept():
+    pool = ProxyPool.from_config(
+        {"proxies": ["http://a:1 # dc-a", "http://10.1.2.3:8000"]}, env={})
+    assert pool.groups() == ["dc-a", "net-1"]
 
 
 def test_groups_from_a_mapping():
@@ -456,7 +474,7 @@ def test_run_proxies_flag_overrides_the_config(tmp_path, monkeypatch):
     assert seen["proxies"] == ["http://p1:1 # dc-a", "http://p2:1"]
     assert "proxy" not in seen  # the file wins over the single proxy
     pool = ProxyPool.from_config(seen, env={})
-    assert pool.groups() == ["dc-a", "p2"]
+    assert pool.groups() == ["dc-a", "net-1"]
 
 
 def test_run_no_proxy_disables_the_pool(tmp_path, monkeypatch):
@@ -641,7 +659,7 @@ def test_spec_s5_proxies_block(tmp_path):
     }}
     pool = ProxyPool.from_config(cfg, env={"GATEWAY_PASSWORD": "pw"},
                                  base_dir=str(tmp_path))
-    assert pool.groups() == ["10.1/16", "gateway"]
+    assert pool.groups() == ["net-1", "gateway"]
     assert pool.cooldown_sec == 42
 
 
@@ -679,7 +697,7 @@ def test_proxies_file_block_list_keeps_labels(tmp_path):
     assert read_proxies_file(str(path)) == ["http://p1:1 # dc-a",
                                             "http://p2:1"]
     pool = ProxyPool.from_config({"proxies": {"list": str(path)}}, env={})
-    assert pool.groups() == ["dc-a", "p2"]
+    assert pool.groups() == ["dc-a", "net-1"]
 
 
 def test_proxies_file_flow_list(tmp_path):
@@ -717,7 +735,7 @@ def test_use_env_false_ignores_the_environment():
     pool = ProxyPool.from_config(
         {"proxies": ["http://cfg:1"]},
         env={"CERTAINLYSCRAPED_PROXIES": "http://env:1"}, use_env=False)
-    assert pool.groups() == ["cfg"]
+    assert pool.groups() == ["net-1"]  # R46: derived labels are neutral
 
 
 def test_no_proxy_beats_the_env_var(tmp_path, monkeypatch):

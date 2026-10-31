@@ -176,9 +176,16 @@ def cmd_run(args):
               f"{counts['unchanged']} unchanged vs {args.since}",
               file=sys.stderr)
 
-    write(out_rows, args.out, cfg.get("output", "csv"))
+    try:
+        write(out_rows, args.out, cfg.get("output", "csv"))
+        if args.snapshot:
+            write(rows, args.snapshot, _format_for(args.snapshot, cfg))
+    except OSError as e:
+        # A mistyped --out directory must not become a traceback: one line,
+        # exit 1, and the per-page report above still landed.
+        print(f"[run] output error: {type(e).__name__}: {e}", file=sys.stderr)
+        sys.exit(EXIT_ERROR)
     if args.snapshot:
-        write(rows, args.snapshot, _format_for(args.snapshot, cfg))
         print(f"[snapshot] {args.snapshot} ({len(rows)} rows)", file=sys.stderr)
     saved = f"[saved] {args.out} ({len(out_rows)} rows)"
     print(saved, file=sys.stderr if args.out == "-" else sys.stdout)

@@ -7,6 +7,7 @@ import random
 import signal
 import subprocess
 import sys
+import threading
 import time
 
 sys.path.insert(0, ".")
@@ -310,6 +311,28 @@ def test_single_page_error_does_not_kill_the_run():
     assert outcomes[1].status == 0
     assert "FetchError" in outcomes[1].note and "boom" in outcomes[1].note
     assert "[parallel] https://s/p2: FetchError: boom" in log.getvalue()
+
+
+def test_concurrency_actually_fetches_pages_in_parallel():
+    """Mutation 20: `concurrency` is not ignored (one worker would peak at 1)."""
+    lock = threading.Lock()
+    state = {"in_flight": 0, "peak": 0}
+
+    def fetch_page(url):
+        with lock:
+            state["in_flight"] += 1
+            state["peak"] = max(state["peak"], state["in_flight"])
+        time.sleep(0.05)
+        with lock:
+            state["in_flight"] -= 1
+        return PageFetch(status=200, html=url)
+
+    urls = [f"https://s/p{i}" for i in range(6)]
+    outcomes = run_parallel(fetch_page, urls,
+                            {"rate_limit_sec": 0, "concurrency": 3},
+                            lambda html, url: 1)
+    assert [o.url for o in outcomes] == urls
+    assert state["peak"] >= 2, state
 
 
 def test_zero_rows_marks_page_empty():
