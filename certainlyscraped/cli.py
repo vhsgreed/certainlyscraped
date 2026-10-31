@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 
 import yaml
@@ -9,12 +10,37 @@ import yaml
 from . import assist, batchprobe, pageprobe
 from .api import scrape
 from .classify import probe
+from .outcome import INCOMPLETE, PageOutcome
 from .output import write
 from .since import diff_rows
-from .verify import (EXIT_EMPTY, EXIT_ERROR, print_report, read_records,
-                     verify_file, verify_records)
+from .verify import (EXIT_EMPTY, EXIT_ERROR, EXIT_INCOMPLETE, EXIT_OK,
+                     print_report, read_records, verify_file, verify_records)
 
 EXIT_BLOCKED = 3
+
+# run's exit contract, keyed by ScrapeResult.status().
+_STATUS_EXITS = {
+    "complete": EXIT_OK,
+    "incomplete": EXIT_INCOMPLETE,
+    "too_few_rows": EXIT_EMPTY,
+    "blocked": EXIT_EMPTY,
+    "error": EXIT_ERROR,
+}
+
+
+def exit_code(status: str, accept_partial: bool) -> int:
+    """Map a run status to an exit code (incomplete -> 0 with --accept-partial)."""
+    code = _STATUS_EXITS.get(status, EXIT_ERROR)
+    if status == "incomplete" and accept_partial:
+        return EXIT_OK
+    return code
+
+
+def write_report(path: str, outcomes: list[PageOutcome]) -> None:
+    """One JSON object per page (JSONL), written whatever the run's fate."""
+    with open(path, "w", encoding="utf-8") as f:
+        for outcome in outcomes:
+            f.write(json.dumps(outcome.to_dict(), ensure_ascii=False) + "\n")
 
 
 def cmd_probe(args):
@@ -80,8 +106,31 @@ def cmd_run(args):
     print(saved, file=sys.stderr if args.out == "-" else sys.stdout)
 
     print_report(res, stream=sys.stderr)
+
+    # The report is evidence about the run, so it lands before any exit
+    # decision: a 2 or a 4 still leaves the per-page record on disk.
+    if args.report:
+        try:
+            write_report(args.report, result.page_report)
+        except OSError as e:
+            print(f"[run] report error: {type(e).__name__}: {e}",
+                  file=sys.stderr)
+            sys.exit(EXIT_ERROR)
+
+    # Verified data is the primary contract: too few rows is always 2, even
+    # when pages were also incomplete.
     if not res.ok:
         sys.exit(EXIT_EMPTY)
+
+    status = result.status(min_rows=args.min_rows)
+    code = exit_code(status, args.accept_partial)
+    if code == EXIT_INCOMPLETE:
+        n = sum(1 for o in result.page_report if o.outcome in INCOMPLETE)
+        print(f"[run] incomplete: {n} page(s) blocked/rate-limited/errored; "
+              f"rows may be missing (exit 4; --accept-partial to accept)",
+              file=sys.stderr)
+    if code:
+        sys.exit(code)
 
 
 def _format_for(path: str, cfg: dict) -> str:
@@ -130,7 +179,11 @@ def main(argv=None):
     assist.add_fetch_arguments(p_fetch)
     p_fetch.set_defaults(func=assist.run_fetch)
 
-    p_run = sub.add_parser("run", help="run a YAML scrape config")
+    p_run = sub.add_parser(
+        "run", help="run a YAML scrape config",
+        epilog="exit codes: 0 ok, 1 error, 2 too few rows, 4 rows verified "
+               "but some pages were blocked, rate-limited or errored "
+               "(--accept-partial to accept those runs)")
     p_run.add_argument("config")
     p_run.add_argument("--out", default="out.csv",
                        help="dataset path, or - for stdout (default out.csv)")
@@ -147,6 +200,12 @@ def main(argv=None):
     p_run.add_argument("--snapshot", metavar="PATH",
                        help="also write every scraped row here; pass the "
                             "same path as --since to keep a rolling state file")
+    p_run.add_argument("--report", metavar="PATH",
+                       help="write one JSON line per page (outcome, status, "
+                            "rows, attempts, steps, proxy_group, elapsed_ms)")
+    p_run.add_argument("--accept-partial", action="store_true",
+                       help="exit 0 when some pages were blocked, "
+                            "rate-limited or errored (default: exit 4)")
     p_run.set_defaults(func=cmd_run)
 
     p_verify = sub.add_parser(

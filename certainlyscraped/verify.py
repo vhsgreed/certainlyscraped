@@ -10,6 +10,8 @@ Exit codes (the contract):
   0  at least min_rows records found
   1  I/O or parse error
   2  fewer than min_rows records (empty result is the common case)
+  4  rows verified, but some pages were blocked, rate-limited or errored
+     (the extraction is real but possibly short; --accept-partial opts out)
 """
 from __future__ import annotations
 
@@ -22,6 +24,7 @@ from dataclasses import dataclass
 EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_EMPTY = 2
+EXIT_INCOMPLETE = 4
 
 
 @dataclass

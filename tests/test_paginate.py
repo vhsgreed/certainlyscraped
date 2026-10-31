@@ -3,7 +3,8 @@ import sys
 
 sys.path.insert(0, ".")
 
-from certainlyscraped.paginate import paginate
+from certainlyscraped.outcome import PageFetch
+from certainlyscraped.paginate import follow_links, paginate
 
 
 def _site(pages: dict):
@@ -67,3 +68,19 @@ def test_normal_end_logs_nothing():
     log = io.StringIO()
     paginate(get_html, "https://s/a", CFG, lambda h: None, log=log)
     assert log.getvalue() == ""
+
+
+def test_follow_links_trailing_404_is_not_found():
+    get_html, _ = _site({"https://s/a": _next("/missing")})
+    seen = []
+
+    def on_page(html, url):
+        seen.append(url)
+        return 1
+
+    outcomes = follow_links(
+        lambda u: PageFetch(*get_html(u)), "https://s/a", CFG, on_page)
+    assert seen == ["https://s/a"]
+    assert [o.outcome for o in outcomes] == ["ok", "not_found"]
+    assert outcomes[1].status == 404
+    assert outcomes[1].url == "https://s/missing"

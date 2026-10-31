@@ -141,3 +141,25 @@ def test_scrape_log_reports_error_status_mid_pagination():
     res = scrape(CFG, fetcher=blocked, log=log)
     assert res.pages == 1
     assert "[paginate] stopped: HTTP 419 on https://shop.test/page2.html" in log.getvalue()
+
+
+def _rate_limited(url):
+    if url.endswith("page2.html"):
+        return 419, "Sorry"
+    return fake_fetch(url)
+
+
+def test_page_report_marks_419_rate_limited():
+    res = scrape(CFG, fetcher=_rate_limited, log=None)
+    assert [o.outcome for o in res.page_report] == ["ok", "rate_limited"]
+    assert res.page_report[1].status == 419
+    assert res.page_report[0].rows == 2
+    assert res.status() == "incomplete"
+
+
+def test_done_line_counts_outcomes():
+    log = io.StringIO()
+    scrape(CFG, fetcher=_rate_limited, log=log)
+    text = log.getvalue()
+    assert "[done] 2 pages: 1 ok, 1 rate_limited (HTTP 419 on /page2.html)" in text
+    assert "[rows] 2 unique items" in text

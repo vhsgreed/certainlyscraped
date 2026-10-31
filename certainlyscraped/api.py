@@ -4,6 +4,8 @@
     result = scrape("examples/hn-front.yaml")
     for row in result.rows:
         ...
+    if result.status() == "incomplete":
+        ...
 
 `config` is a path to a YAML file or an already-loaded dict with the same
 keys. Nothing is written to disk; use `certainlyscraped.output.write` for that.
@@ -12,6 +14,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -19,7 +22,8 @@ import yaml
 
 from .extract import extract_page
 from .fetch import fetch as _fetch
-from .paginate import paginate
+from .outcome import PageFetch, PageOutcome, scrape_status, summary_line
+from .paginate import follow_links
 
 Fetcher = Callable[[str], "tuple[int, str]"]
 
@@ -30,6 +34,11 @@ class ScrapeResult:
     pages: int
     tier: int
     config: dict = field(repr=False, default_factory=dict)
+    page_report: list[PageOutcome] = field(default_factory=list)
+
+    def status(self, min_rows: int = 1) -> str:
+        """complete | incomplete | too_few_rows | blocked | error."""
+        return scrape_status(len(self.rows), self.page_report, min_rows)
 
 
 def load_config(config: str | dict) -> dict:
@@ -55,6 +64,17 @@ def resolve_tier(cfg: dict, log=None) -> int:
     return res.tier
 
 
+def as_page_fetcher(fetcher: Callable[[str], tuple[int, str]],
+                    tier: int) -> Callable[[str], PageFetch]:
+    """Wrap a `url -> (status, html)` fetcher as a timing PageFetch source."""
+    def fetch_page(url: str) -> PageFetch:
+        start = time.monotonic()
+        status, html = fetcher(url)
+        return PageFetch(status=status, html=html, steps=[f"t{tier}"],
+                         elapsed_ms=int((time.monotonic() - start) * 1000))
+    return fetch_page
+
+
 def scrape(config: str | dict, *, tier: int | None = None,
            fetcher: Fetcher | None = None, log=sys.stderr) -> ScrapeResult:
     """Fetch every page the config paginates over and extract its items.
@@ -74,22 +94,22 @@ def scrape(config: str | dict, *, tier: int | None = None,
 
     rows: list[dict] = []
     seen: set[str] = set()
-    current = {"url": cfg["url"]}
-    base_fetcher = fetcher
 
-    def fetcher(u):  # noqa: F811 - wraps the chosen fetcher to track the page URL
-        current["url"] = u
-        return base_fetcher(u)
-
-    def on_page(html):
-        for item in extract_page(html, cfg, current["url"]):
+    def on_page(html, url):
+        added = 0
+        for item in extract_page(html, cfg, url):
             key = json.dumps(item, ensure_ascii=False, sort_keys=True,
                              default=str)
             if key not in seen:
                 seen.add(key)
                 rows.append(item)
+                added += 1
+        return added
 
-    pages = paginate(fetcher, cfg["url"], cfg, on_page, log=log)
+    outcomes = follow_links(as_page_fetcher(fetcher, tier), cfg["url"], cfg,
+                            on_page, log=log)
+    pages = sum(1 for o in outcomes if o.status < 400)
     if log:
-        print(f"[done] {pages} pages, {len(rows)} unique items", file=log)
-    return ScrapeResult(rows, pages, tier, cfg)
+        print(summary_line(outcomes), file=log)
+        print(f"[rows] {len(rows)} unique items", file=log)
+    return ScrapeResult(rows, pages, tier, cfg, outcomes)
