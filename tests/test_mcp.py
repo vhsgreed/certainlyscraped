@@ -13,6 +13,7 @@ import asyncio
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -236,7 +237,8 @@ def test_scrape_caps_max_pages(tmp_path):
                              "items: { selector: 'li' }\n"
                              "max_pages: 100000\n"})
     assert any("max_pages" in n for n in res["notes"])
-    assert seen["cfg"]["max_pages"] == 1000
+    # 100 is follow_links' own ceiling (min(cfg max_pages, 100)).
+    assert seen["cfg"]["max_pages"] == 100
 
 
 def test_scrape_refuses_dataset_escaping_workdir(tmp_path):
@@ -367,3 +369,172 @@ def test_stdio_server_roundtrip(tmp_path):
     payload = json.loads(res.content[0].text)
     assert payload["status"] in {"error", "blocked"}, payload
     assert (tmp_path / ".certainlyscraped").is_dir() is False
+
+
+# -- 8. numeric config is bounded before the first fetch (R15) --------------
+
+def _recording_scraper(seen):
+    def fake_scrape(cfg, *, guard=None, log=None):
+        seen["cfg"] = dict(cfg)
+        return FakeResult([{"i": 0}])
+    return fake_scrape
+
+
+def _scrape_with(tmp_path, want_cfg: str, **args):
+    seen = {}
+    start = time.monotonic()
+    res, raw = call(build_server(tmp_path, _scrape=_recording_scraper(seen)),
+                    "scrape", {"config": want_cfg, **args})
+    elapsed = time.monotonic() - start
+    return res, raw, seen.get("cfg", {}), elapsed
+
+
+def test_rate_limit_at_the_cap_returns_quickly(tmp_path):
+    res, raw, cfg, elapsed = _scrape_with(
+        tmp_path, "url: https://example.com/x\nitems: { selector: 'li' }\n"
+                  "rate_limit_sec: 30\nmax_pages: 2\n")
+    assert not raw.is_error
+    assert elapsed < 2, elapsed
+    assert res["status"] == "complete"
+    assert cfg["rate_limit_sec"] == 30.0
+    assert not any("rate_limit_sec" in n for n in res["notes"])
+
+
+def test_rate_limit_above_the_cap_is_clamped(tmp_path):
+    res, _, cfg, elapsed = _scrape_with(
+        tmp_path, "url: https://example.com/x\nitems: { selector: 'li' }\n"
+                  "rate_limit_sec: 5000\n")
+    assert elapsed < 2, elapsed
+    assert res["status"] == "complete"
+    assert cfg["rate_limit_sec"] == 30.0
+    assert any("rate_limit_sec" in n and "30" in n for n in res["notes"])
+
+
+@pytest.mark.parametrize("bad", ["abc", -5, ".nan", ".inf"])
+def test_rate_limit_bad_value_falls_back_with_a_note(tmp_path, bad):
+    res, raw, cfg, elapsed = _scrape_with(
+        tmp_path, "url: https://example.com/x\nitems: { selector: 'li' }\n"
+                  f"rate_limit_sec: {bad}\n")
+    assert not raw.is_error
+    assert elapsed < 2, elapsed
+    assert res["status"] == "complete"          # rows were not thrown away
+    assert cfg["rate_limit_sec"] == 2.0         # the library's own default
+    assert any("rate_limit_sec" in n for n in res["notes"])
+
+
+def test_max_pages_cap_states_the_library_ceiling(tmp_path):
+    res, _, cfg, _ = _scrape_with(
+        tmp_path, "url: https://example.com/x\nitems: { selector: 'li' }\n"
+                  "max_pages: 5000\n")
+    assert cfg["max_pages"] == 100
+    assert any("max_pages" in n and "100" in n for n in res["notes"])
+
+
+def test_timeout_bad_value_falls_back_with_a_note(tmp_path):
+    res, _, cfg, _ = _scrape_with(
+        tmp_path, "url: https://example.com/x\nitems: { selector: 'li' }\n"
+                  "timeout: 'x'\n")
+    assert res["status"] == "complete"
+    assert cfg["timeout"] == 30.0
+    assert any("timeout" in n for n in res["notes"])
+
+
+def test_timeout_is_clamped_into_range(tmp_path):
+    res, _, cfg, _ = _scrape_with(
+        tmp_path, "url: https://example.com/x\nitems: { selector: 'li' }\n"
+                  "timeout: 100000\n")
+    assert cfg["timeout"] == 120.0
+    assert any("timeout" in n for n in res["notes"])
+    res, _, cfg, _ = _scrape_with(
+        tmp_path, "url: https://example.com/x\nitems: { selector: 'li' }\n"
+                  "timeout: -3\n")
+    assert cfg["timeout"] == 1.0
+    assert any("timeout" in n for n in res["notes"])
+
+
+@pytest.mark.parametrize("key", ["items", "fields", "paginate"])
+def test_non_mapping_blocks_are_refused_before_any_fetch(tmp_path, key):
+    def boom(cfg, **kw):  # pragma: no cover
+        raise AssertionError("must not run")
+
+    res, raw = call(build_server(tmp_path, _scrape=boom), "scrape",
+                    {"config": "url: https://example.com/x\n"
+                               "items: { selector: 'li' }\n"
+                               f"{key}: 'oops'\n"})
+    assert not raw.is_error
+    assert res["status"] == "error"
+    assert any(key in n for n in res["notes"])
+
+
+def test_paginate_must_be_a_mapping_before_any_fetch(tmp_path):
+    def boom(cfg, **kw):  # pragma: no cover
+        raise AssertionError("must not run")
+
+    res, raw = call(build_server(tmp_path, _scrape=boom), "scrape",
+                    {"config": "url: https://example.com/x\n"
+                               "items: { selector: 'li' }\n"
+                               "paginate: 'next'\n"})
+    assert not raw.is_error
+    assert res["status"] == "error"
+    assert any("paginate" in n for n in res["notes"])
+
+
+# -- 9. a mistyped argument is still a status dict (R16) --------------------
+
+def test_scrape_non_string_config_is_a_status_dict(tmp_path):
+    def boom(cfg, **kw):  # pragma: no cover
+        raise AssertionError("must not run")
+
+    res, raw = call(build_server(tmp_path, _scrape=boom), "scrape",
+                    {"config": 123})
+    assert not raw.is_error
+    assert res["status"] == "error"
+    assert res["notes"] and "config" in notes(res)
+
+
+def test_probe_non_string_url_is_a_status_dict(tmp_path):
+    res, raw = call(build_server(tmp_path), "probe", {"url": 127})
+    assert not raw.is_error
+    assert res["status"] == "error"
+    assert "url must be a string" in res["note"]
+
+
+def test_init_non_string_url_is_a_status_dict(tmp_path):
+    res, raw = call(build_server(tmp_path), "init", {"url": 12.5})
+    assert not raw.is_error
+    assert res["status"] == "error"
+    assert "url must be a string" in notes(res)
+
+
+def test_try_selector_loose_arguments_are_a_status_dict(tmp_path):
+    res, raw = call(build_server(tmp_path), "try_selector",
+                    {"url": 127, "selector": 5})
+    assert not raw.is_error
+    assert res["status"] == "error"
+    assert res["hints"]
+
+
+@pytest.mark.parametrize("name", ["probe", "init", "try_selector", "scrape"])
+def test_missing_arguments_are_a_status_dict(tmp_path, name):
+    """Even a call with no arguments is a result the agent can read."""
+    res, raw = call(build_server(tmp_path), name, {})
+    assert not raw.is_error
+    assert res["status"] == "error"
+
+
+def test_scrape_non_numeric_max_rows_uses_the_default(tmp_path):
+    rows = [{"i": i} for i in range(60)]
+    seen = {}
+
+    def fake_scrape(cfg, *, guard=None, log=None):
+        seen["cfg"] = cfg
+        return FakeResult(rows)
+
+    res, raw = call(build_server(tmp_path, _scrape=fake_scrape), "scrape",
+                    {"config": "url: https://example.com/x\n"
+                               "items: { selector: 'li' }\n",
+                     "max_rows": "abc"})
+    assert not raw.is_error
+    assert res["status"] == "complete"
+    assert len(res["rows"]) == 50            # DEFAULT_MAX_ROWS
+    assert any("max_rows" in n for n in res["notes"])

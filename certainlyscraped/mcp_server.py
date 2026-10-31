@@ -21,9 +21,11 @@ the library passes `log=None`.
 from __future__ import annotations
 
 import json
+import math
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import yaml
 from mcp.server.mcpserver import MCPServer
@@ -50,8 +52,15 @@ REFUSED_CONFIG_KEYS = frozenset({
 MAX_TIER = 2
 MAX_ROWS_CAP = 500
 DEFAULT_MAX_ROWS = 50
-MAX_PAGES_CAP = 1000
-MAX_TIMEOUT = 120
+# follow_links itself clamps with min(cfg max_pages, 100): 100 is the real
+# ceiling, so announcing anything higher would be a lie.
+MAX_PAGES_CAP = 100
+DEFAULT_MAX_PAGES = 10
+DEFAULT_RATE_LIMIT = 2.0
+MAX_RATE_LIMIT = 30.0
+DEFAULT_TIMEOUT = 30.0
+MIN_TIMEOUT = 1.0
+MAX_TIMEOUT = 120.0
 
 
 class _ConfigError(ValueError):
@@ -78,7 +87,9 @@ def _jsonable(value):
 
 def _check_target(url) -> str:
     """An http(s) URL string, or _ConfigError. Never a path, never file://."""
-    if not isinstance(url, str) or not url.strip():
+    if not isinstance(url, str):
+        raise _ConfigError("url must be a string")
+    if not url.strip():
         raise _ConfigError("url must be a non-empty string")
     url = url.strip()
     if url.lower().startswith("file://"):
@@ -88,6 +99,56 @@ def _check_target(url) -> str:
         raise _ConfigError("url must be an http:// or https:// URL "
                            "(local paths and file:// are not readable)")
     return url
+
+
+def _bounded_float(name: str, value, default: float, low: float, high: float,
+                   notes: list[str], *, low_is_default: bool = False) -> float:
+    """A finite float in [low, high], or `default` with a note.
+
+    Never raises: this runs before the first fetch, so a note is enough, and
+    the library only ever sees a value it cannot choke on. `low_is_default`
+    makes a below-range value fall back to the default instead of clamping up
+    (a negative delay means "you typed nonsense", not "go as fast as you can").
+    """
+    try:
+        n = float(value)
+    except (TypeError, ValueError):
+        notes.append(f"{name} is not a number ({value!r}); "
+                     f"using the default {default}")
+        return default
+    if not math.isfinite(n):
+        notes.append(f"{name} must be a finite number (got {value!r}); "
+                     f"using the default {default}")
+        return default
+    if n < low:
+        if low_is_default:
+            notes.append(f"{name} must be a number >= {low:g} "
+                         f"(got {value!r}); using the default {default}")
+            return default
+        notes.append(f"{name} clamped to {low:g}")
+        return float(low)
+    if n > high:
+        notes.append(f"{name} clamped to {high:g}")
+        return float(high)
+    return n
+
+
+def _bounded_pages(value, notes: list[str]) -> int:
+    """max_pages as an int in [1, MAX_PAGES_CAP]; follow_links caps at 100."""
+    try:
+        n = int(value)
+    except (TypeError, ValueError, OverflowError):
+        notes.append(f"max_pages is not a whole number ({value!r}); "
+                     f"using the default {DEFAULT_MAX_PAGES}")
+        return DEFAULT_MAX_PAGES
+    if n < 1:
+        notes.append("max_pages must be at least 1; using 1")
+        return 1
+    if n > MAX_PAGES_CAP:
+        notes.append(f"max_pages capped at {MAX_PAGES_CAP} "
+                     "(the pagination loop's own ceiling)")
+        return MAX_PAGES_CAP
+    return n
 
 
 def _check_config(text) -> tuple[dict, list[str]]:
@@ -119,22 +180,25 @@ def _check_config(text) -> tuple[dict, list[str]]:
 
     cfg = dict(raw)
     cfg["url"] = _check_target(cfg.get("url"))
-    for key in ("items", "fields"):
+    for key in ("items", "fields", "paginate"):
         if key in cfg and not isinstance(cfg[key], dict):
+            # paginate is read *after* the first page is fetched; a bad type
+            # there would throw away pages already paid for. items/fields are
+            # read on the first page, so the same argument applies.
             raise _ConfigError(f"{key} must be a mapping")
-    for key in ("max_pages", "timeout"):
-        if key in cfg:
-            try:
-                cfg[key] = int(cfg[key])
-            except (TypeError, ValueError):
-                raise _ConfigError(f"{key} must be an integer") from None
-    # Bounds, not policy: one tool call may not occupy the server forever.
-    if cfg.get("max_pages", 0) > MAX_PAGES_CAP:
-        cfg["max_pages"] = MAX_PAGES_CAP
-        notes.append(f"max_pages capped at {MAX_PAGES_CAP}")
-    if cfg.get("timeout", 0) > MAX_TIMEOUT:
-        cfg["timeout"] = MAX_TIMEOUT
-        notes.append(f"timeout capped at {MAX_TIMEOUT}s")
+    # Everything below is normalised before the first request: a bad value
+    # that reached the library would either sleep for hours, or raise inside
+    # the pagination loop after the rows were already fetched.
+    if "max_pages" in cfg:
+        cfg["max_pages"] = _bounded_pages(cfg["max_pages"], notes)
+    if "rate_limit_sec" in cfg:
+        cfg["rate_limit_sec"] = _bounded_float(
+            "rate_limit_sec", cfg["rate_limit_sec"], DEFAULT_RATE_LIMIT,
+            0.0, MAX_RATE_LIMIT, notes, low_is_default=True)
+    if "timeout" in cfg:
+        cfg["timeout"] = _bounded_float(
+            "timeout", cfg["timeout"], DEFAULT_TIMEOUT, MIN_TIMEOUT,
+            MAX_TIMEOUT, notes)
 
     tier = cfg.get("tier", "auto")
     if tier != "auto":
@@ -157,8 +221,11 @@ def _int_arg(name: str, value, default: int, low: int, high: int | None = None):
         return default, []
     try:
         n = int(value)
-    except (TypeError, ValueError):
-        raise _ConfigError(f"{name} must be an integer") from None
+    except (TypeError, ValueError, OverflowError):
+        # A mistyped tool argument must not cost the agent its call: fall back
+        # to the documented default and say so.
+        return default, [f"{name} must be a whole number (got {value!r}); "
+                         f"using the default {default}"]
     notes = []
     if n < low:
         n = low
@@ -222,7 +289,7 @@ def build_server(workdir: Path, allow_private: bool = False, *,
     server = MCPServer(name="certainlyscraped", version=__version__)
 
     @server.tool()
-    def probe(url: str) -> dict:
+    def probe(url: Any = None) -> dict:
         """Classify a page's anti-bot defences before scraping it.
 
         Returns {status: ok|blocked|error, tier (1-2 reachable here; 3 means
@@ -256,7 +323,7 @@ def build_server(workdir: Path, allow_private: bool = False, *,
         }
 
     @server.tool()
-    def init(url: str) -> dict:
+    def init(url: Any = None) -> dict:
         """Draft a scrape config for a listing page and return it as YAML text.
 
         Returns {status: ok|error, config (YAML text, ready to pass to
@@ -301,8 +368,8 @@ def build_server(workdir: Path, allow_private: bool = False, *,
                           fields={}, rows_preview=[])
 
     @server.tool()
-    def try_selector(url: str, selector: str,
-                     within: str | None = None) -> dict:
+    def try_selector(url: Any = None, selector: Any = None,
+                     within: Any = None) -> dict:
         """Test a CSS selector against the live page and show what it finds.
 
         Returns {status: ok|nothing|error, matches, values (up to 20), tags,
@@ -339,14 +406,16 @@ def build_server(workdir: Path, allow_private: bool = False, *,
         }
 
     @server.tool()
-    def scrape(config: str, min_rows: int = 1,
-               max_rows: int = DEFAULT_MAX_ROWS) -> dict:
+    def scrape(config: Any = None, min_rows: Any = 1,
+               max_rows: Any = DEFAULT_MAX_ROWS) -> dict:
         """Run an inline YAML/JSON scrape config and return rows plus a dataset.
 
         `config` is config TEXT (not a path). Allowed keys: url, items,
         fields, json, paginate, max_pages, rate_limit_sec, timeout, tier,
         output, headers. `proxy`/`cookies`/`since`/`snapshot`/`fetcher` are
-        refused and tier is capped at 2. Returns {status: complete |
+        refused and tier is capped at 2. Per-call bounds (notes say when one
+        applied): max_pages 100, rate_limit_sec 0-30, timeout 1-120 s.
+        Returns {status: complete |
         incomplete | too_few_rows | blocked | error, rows (up to max_rows,
         default 50, cap 500), row_count (the true total), dataset_path (full
         JSONL in the server's working directory), pages (per-page outcomes),
