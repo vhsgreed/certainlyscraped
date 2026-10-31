@@ -45,7 +45,7 @@ certainlyscraped mcp
 That gives the agent `probe`, `init`, `try_selector` and `scrape`; the full
 contract is under [MCP server (for agents)](#mcp-server-for-agents).
 
-![certainlyscraped demo recorded before the rename: init, try, run](docs/demo.gif)
+![certainlyscraped demo: init, try, run](docs/demo.gif)
 
 Real output from the daily live check:
 

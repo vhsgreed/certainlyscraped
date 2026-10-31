@@ -5,6 +5,8 @@ name: demo
 on:
   workflow_dispatch:
   push:
+    # Branch pushes only: a tag push has no branch to commit the gif back to.
+    branches: [master]
     paths:
       - "docs/demo.tape"
       - ".github/workflows/demo.yml"
