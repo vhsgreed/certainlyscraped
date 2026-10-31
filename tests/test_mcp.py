@@ -538,3 +538,260 @@ def test_scrape_non_numeric_max_rows_uses_the_default(tmp_path):
     assert res["status"] == "complete"
     assert len(res["rows"]) == 50            # DEFAULT_MAX_ROWS
     assert any("max_rows" in n for n in res["notes"])
+
+
+# -- 10. pages, urls and the ladder knobs (R17/R21) -------------------------
+
+BOOKS_CFG = ("items: { selector: 'article.product_pod' }\n"
+             "fields:\n"
+             "  title: { selector: 'h3 a', attr: title }\n")
+
+
+def _api_with_pages(html, seen: dict):
+    """A scrape implementation that runs the real API over a fake network.
+
+    With ``html=None`` each URL gets one distinct item, so dedupe (which is
+    by row value) cannot turn later pages into ``empty``.
+    """
+    from certainlyscraped.api import scrape as api_scrape
+
+    def fetcher(url):
+        seen.setdefault("urls", []).append(url)
+        if html is None:
+            return 200, (f"<article class='product_pod'><h3>"
+                         f"<a title='{url}' href='{url}'>x</a></h3></article>")
+        return 200, html
+
+    def fake_scrape(cfg, *, guard=None, log=None):
+        seen["cfg"] = dict(cfg)
+        return api_scrape(cfg, fetcher=fetcher, log=None)
+
+    return fake_scrape
+
+
+def _scrape_with_config(tmp_path, text, html=None):
+    seen = {}
+    res, raw = call(build_server(tmp_path,
+                                 _scrape=_api_with_pages(html, seen)),
+                    "scrape", {"config": text})
+    return res, raw, seen
+
+
+def test_pages_config_scrapes_without_a_top_level_url(tmp_path):
+    cfg = ("pages:\n"
+           "  template: 'https://example.com/news?p={n}'\n"
+           "  from: 1\n"
+           "  to: 3\n" + BOOKS_CFG)
+    res, raw, seen = _scrape_with_config(tmp_path, cfg)
+    assert not raw.is_error
+    assert res["status"] == "complete"
+    assert len(res["pages"]) == 3
+    assert {p["outcome"] for p in res["pages"]} == {"ok"}
+    assert seen["urls"] == [f"https://example.com/news?p={n}"
+                            for n in (1, 2, 3)]
+    assert res["row_count"] > 0
+
+
+def test_urls_config_scrapes_without_a_top_level_url(tmp_path):
+    cfg = ("urls:\n"
+           "  - 'https://example.com/a'\n"
+           "  - 'https://example.com/b'\n" + BOOKS_CFG)
+    res, raw, seen = _scrape_with_config(tmp_path, cfg)
+    assert not raw.is_error
+    assert res["status"] == "complete"
+    assert [p["url"] for p in res["pages"]] == ["https://example.com/a",
+                                                "https://example.com/b"]
+    assert seen["urls"] == ["https://example.com/a", "https://example.com/b"]
+
+
+def test_pages_range_is_capped_with_a_note(tmp_path):
+    res, raw, seen = _scrape_with_config(
+        tmp_path, "pages:\n"
+                  "  template: 'https://example.com/p={n}'\n"
+                  "  from: 1\n"
+                  "  to: 500\n" + BOOKS_CFG, html="<html></html>")
+    assert not raw.is_error
+    assert seen["cfg"]["pages"]["to"] == 100
+    assert any("pages" in n and "100" in n for n in res["notes"])
+
+
+@pytest.mark.parametrize("pages", [
+    "'oops'",
+    "{template: 'https://example.com/p', from: 1, to: 2}",
+    "{template: 'https://example.com/p={n}', from: 'x', to: 2}",
+    "{template: 'https://example.com/p={n}', from: 5, to: 2}",
+    "{template: 'example.com/p={n}', from: 1, to: 2}",
+])
+def test_malformed_pages_is_a_status_dict(tmp_path, pages):
+    def boom(cfg, **kw):  # pragma: no cover
+        raise AssertionError("must not run")
+
+    res, raw = call(build_server(tmp_path, _scrape=boom), "scrape",
+                    {"config": f"pages: {pages}\n" + BOOKS_CFG})
+    assert not raw.is_error
+    assert res["status"] == "error"
+    assert any("pages" in n for n in res["notes"])
+
+
+def test_urls_are_capped_with_a_note(tmp_path):
+    urls = [f"https://example.com/{i}" for i in range(150)]
+    seen = {}
+
+    def fake_scrape(cfg, *, guard=None, log=None):
+        seen["cfg"] = dict(cfg)
+        return FakeResult([{"i": 0}])
+
+    res, raw = call(build_server(tmp_path, _scrape=fake_scrape), "scrape",
+                    {"config": "urls:\n" + "".join(f"  - '{u}'\n" for u in urls)
+                               + BOOKS_CFG})
+    assert not raw.is_error
+    assert res["status"] == "complete"
+    assert len(seen["cfg"]["urls"]) == 100
+    assert any("urls" in n and "100" in n for n in res["notes"])
+
+
+@pytest.mark.parametrize("entry,needle", [
+    ("/relative/page", "urls[1]"),
+    ("ftp://example.com/x", "urls[1]"),
+    ("", "urls[1]"),
+    ("123", "urls[1]"),
+])
+def test_urls_relative_or_non_string_entry_is_refused(tmp_path, entry, needle):
+    def boom(cfg, **kw):  # pragma: no cover
+        raise AssertionError("must not run")
+
+    raw_yaml = ("urls:\n"
+                "  - 'https://example.com/a'\n"
+                f"  - {entry!r}\n" if not str(entry).isdigit()
+                else "urls:\n"
+                     "  - 'https://example.com/a'\n"
+                     f"  - {entry}\n")
+    res, raw = call(build_server(tmp_path, _scrape=boom), "scrape",
+                    {"config": raw_yaml + BOOKS_CFG})
+    assert not raw.is_error
+    assert res["status"] == "error"
+    assert any(needle in n for n in res["notes"])
+
+
+def test_urls_empty_is_refused(tmp_path):
+    def boom(cfg, **kw):  # pragma: no cover
+        raise AssertionError("must not run")
+
+    res, raw = call(build_server(tmp_path, _scrape=boom), "scrape",
+                    {"config": "urls: []\n" + BOOKS_CFG})
+    assert not raw.is_error
+    assert res["status"] == "error"
+    assert any("urls" in n for n in res["notes"])
+
+
+def test_two_page_sources_are_refused_before_any_fetch(tmp_path):
+    def boom(cfg, **kw):  # pragma: no cover
+        raise AssertionError("must not run")
+
+    res, raw = call(build_server(tmp_path, _scrape=boom), "scrape",
+                    {"config": "pages: {template: 'https://e.com/{n}', to: 2}\n"
+                               "urls: ['https://e.com/a']\n" + BOOKS_CFG})
+    assert not raw.is_error
+    assert res["status"] == "error"
+    assert any("page source" in n for n in res["notes"])
+
+
+def test_concurrency_is_validated_and_clamped(tmp_path):
+    res, _, cfg, _ = _scrape_with(
+        tmp_path, "url: https://example.com/x\nitems: { selector: 'li' }\n"
+                  "concurrency: 4\n")
+    assert res["status"] == "complete"
+    assert cfg["concurrency"] == 4
+    assert not any("concurrency" in n for n in res["notes"])
+
+    res, _, cfg, _ = _scrape_with(
+        tmp_path, "url: https://example.com/x\nitems: { selector: 'li' }\n"
+                  "concurrency: 500\n")
+    assert cfg["concurrency"] == 16
+    assert any("concurrency" in n for n in res["notes"])
+
+    res, raw, cfg, _ = _scrape_with(
+        tmp_path, "url: https://example.com/x\nitems: { selector: 'li' }\n"
+                  "concurrency: 'lots'\n")
+    assert not raw.is_error
+    assert res["status"] == "complete"
+    assert cfg["concurrency"] == 1
+    assert any("concurrency" in n for n in res["notes"])
+
+
+def test_max_tier_is_capped_at_two_with_a_note(tmp_path):
+    res, _, cfg, _ = _scrape_with(
+        tmp_path, "url: https://example.com/x\nitems: { selector: 'li' }\n"
+                  "max_tier: 3\n")
+    assert res["status"] == "complete"
+    assert cfg["max_tier"] == 2
+    assert any("max_tier" in n for n in res["notes"])
+
+    res, _, cfg, _ = _scrape_with(
+        tmp_path, "url: https://example.com/x\nitems: { selector: 'li' }\n"
+                  "max_tier: 1\n")
+    assert cfg["max_tier"] == 1
+    assert not any("max_tier" in n for n in res["notes"])
+
+
+def test_max_retries_is_bounded(tmp_path):
+    res, _, cfg, _ = _scrape_with(
+        tmp_path, "url: https://example.com/x\nitems: { selector: 'li' }\n"
+                  "max_retries: 9\n")
+    assert cfg["max_retries"] == 3
+    assert any("max_retries" in n for n in res["notes"])
+
+    res, _, cfg, _ = _scrape_with(
+        tmp_path, "url: https://example.com/x\nitems: { selector: 'li' }\n"
+                  "max_retries: 0\n")
+    assert cfg["max_retries"] == 0
+    assert not any("max_retries" in n for n in res["notes"])
+
+    res, raw, cfg, _ = _scrape_with(
+        tmp_path, "url: https://example.com/x\nitems: { selector: 'li' }\n"
+                  "max_retries: 'many'\n")
+    assert not raw.is_error
+    assert res["status"] == "complete"
+    assert cfg["max_retries"] == 3
+    assert any("max_retries" in n for n in res["notes"])
+
+
+def test_cooldown_sec_is_capped_below_the_blocking_sleep_limit(tmp_path):
+    res, _, cfg, _ = _scrape_with(
+        tmp_path, "url: https://example.com/x\nitems: { selector: 'li' }\n"
+                  "cooldown_sec: 300\n")
+    assert cfg["cooldown_sec"] == 60.0
+    assert any("cooldown_sec" in n and "60" in n for n in res["notes"])
+
+    res, _, cfg, _ = _scrape_with(
+        tmp_path, "url: https://example.com/x\nitems: { selector: 'li' }\n"
+                  "cooldown_sec: 2.5\n")
+    assert cfg["cooldown_sec"] == 2.5
+    assert not any("cooldown_sec" in n for n in res["notes"])
+
+
+def test_per_proxy_rate_sec_is_bounded(tmp_path):
+    res, _, cfg, _ = _scrape_with(
+        tmp_path, "url: https://example.com/x\nitems: { selector: 'li' }\n"
+                  "per_proxy_rate_sec: 500\n")
+    assert cfg["per_proxy_rate_sec"] == 30.0
+    assert any("per_proxy_rate_sec" in n for n in res["notes"])
+
+    res, _, cfg, _ = _scrape_with(
+        tmp_path, "url: https://example.com/x\nitems: { selector: 'li' }\n"
+                  "per_proxy_rate_sec: 0.5\n")
+    assert cfg["per_proxy_rate_sec"] == 0.5
+    assert not any("per_proxy_rate_sec" in n for n in res["notes"])
+
+
+@pytest.mark.parametrize("key", ["proxy", "proxies", "cookies"])
+def test_server_side_keys_stay_refused_alongside_pages(tmp_path, key):
+    def boom(cfg, **kw):  # pragma: no cover
+        raise AssertionError("must not run")
+
+    res, raw = call(build_server(tmp_path, _scrape=boom), "scrape",
+                    {"config": "pages: {template: 'https://e.com/{n}', to: 2}\n"
+                               f"{key}: 'server-side'\n" + BOOKS_CFG})
+    assert not raw.is_error
+    assert res["status"] == "error"
+    assert any(key in n for n in res["notes"])

@@ -45,6 +45,10 @@ from .suggest import explain_matches, suggest
 ALLOWED_CONFIG_KEYS = frozenset({
     "url", "items", "fields", "json", "paginate", "max_pages",
     "rate_limit_sec", "timeout", "tier", "output", "headers",
+    # Page sources (R17): the parallel runner's own shapes.
+    "pages", "urls", "concurrency",
+    # Escalation ladder and proxy pool knobs (R21).
+    "max_tier", "max_retries", "cooldown_sec", "per_proxy_rate_sec",
 })
 REFUSED_CONFIG_KEYS = frozenset({
     "proxy", "proxies", "cookies", "since", "snapshot", "fetcher",
@@ -54,14 +58,26 @@ MAX_TIER = 2
 MAX_ROWS_CAP = 500
 DEFAULT_MAX_ROWS = 50
 # follow_links itself clamps with min(cfg max_pages, 100): 100 is the real
-# ceiling, so announcing anything higher would be a lie.
+# ceiling, so announcing anything higher would be a lie. runner.RANGE_CAP is
+# the same 100 for a `pages:` template range.
 MAX_PAGES_CAP = 100
+MAX_RANGE_CAP = 100
+MAX_URLS = 100
 DEFAULT_MAX_PAGES = 10
 DEFAULT_RATE_LIMIT = 2.0
 MAX_RATE_LIMIT = 30.0
 DEFAULT_TIMEOUT = 30.0
 MIN_TIMEOUT = 1.0
 MAX_TIMEOUT = 120.0
+MAX_CONCURRENCY = 16
+DEFAULT_MAX_RETRIES = 3
+MAX_MAX_RETRIES = 3
+# The ladder's own default is 300 s. That is fine on the CLI, where Ctrl-C
+# reaches the sleep; inline on the sync MCP server it would block the whole
+# tool call, so the server pins the default and the cap at 60.
+DEFAULT_COOLDOWN = 60.0
+MAX_COOLDOWN = 60.0
+MAX_PER_PROXY_RATE = 30.0
 
 
 class _ConfigError(ValueError):
@@ -152,6 +168,90 @@ def _bounded_pages(value, notes: list[str]) -> int:
     return n
 
 
+def _bounded_int(name: str, value, default: int, low: int, high: int,
+                 notes: list[str]) -> int:
+    """An int in [low, high], or `default` with a note. Never raises.
+
+    Same contract as :func:`_bounded_float`: this runs before the first
+    fetch, so a note is enough and the library cannot choke on the value.
+    """
+    try:
+        n = int(value)
+    except (TypeError, ValueError, OverflowError):
+        notes.append(f"{name} is not a whole number ({value!r}); "
+                     f"using the default {default}")
+        return default
+    if n < low:
+        notes.append(f"{name} clamped to {low}")
+        return low
+    if n > high:
+        notes.append(f"{name} clamped to {high}")
+        return high
+    return n
+
+
+def _check_pages(value, notes: list[str]) -> dict:
+    """A `pages:` mapping, validated and range-capped before any fetch.
+
+    The runner would raise on most of this only after the scrape started
+    (page_source runs inside api.scrape), and its range cap is announced on
+    a log stream the MCP server does not have; so the shape is checked here.
+    """
+    if not isinstance(value, dict):
+        raise _ConfigError("pages must be a mapping with template, from and to")
+    template = value.get("template")
+    if not isinstance(template, str) or "{n}" not in template:
+        raise _ConfigError("pages.template must be a string containing {n}")
+    if not template.lower().startswith(("http://", "https://")):
+        raise _ConfigError("pages.template must be an absolute http:// or "
+                           "https:// URL containing {n}")
+    bounds = {}
+    for key in ("from", "to"):
+        raw = value.get(key, 1)
+        try:
+            bounds[key] = int(raw)
+        except (TypeError, ValueError, OverflowError):
+            raise _ConfigError(
+                f"pages.{key} must be a whole number (got {raw!r})") from None
+    start, stop = bounds["from"], bounds["to"]
+    if stop < start:
+        raise _ConfigError(
+            f"pages.from ({start}) is greater than pages.to ({stop})")
+    if stop - start + 1 > MAX_RANGE_CAP:
+        stop = start + MAX_RANGE_CAP - 1
+        notes.append(f"pages range capped at {MAX_RANGE_CAP} pages "
+                     f"(from {start} to {stop})")
+    return {"template": template.strip(), "from": start, "to": stop}
+
+
+def _check_urls(value, notes: list[str]) -> list[str]:
+    """A `urls:` list of absolute http(s) strings, capped at MAX_URLS.
+
+    An entry that is not an absolute http(s) URL is refused by index, before
+    the first fetch: the runner would stringify it and the guard would then
+    fail one page after the others were already paid for.
+    """
+    if isinstance(value, str) or not isinstance(value, (list, tuple)):
+        raise _ConfigError("urls must be a list of absolute http(s) URLs")
+    if not value:
+        raise _ConfigError("urls is empty: list at least one URL")
+    out: list[str] = []
+    for i, entry in enumerate(value):
+        if not isinstance(entry, str) or not entry.strip():
+            raise _ConfigError(
+                f"urls[{i}] must be a non-empty string (got {entry!r})")
+        url = entry.strip()
+        if not url.lower().startswith(("http://", "https://")):
+            raise _ConfigError(
+                f"urls[{i}] is not an absolute http:// or https:// URL: "
+                f"{url!r}")
+        out.append(url)
+    if len(out) > MAX_URLS:
+        notes.append(f"urls capped at {MAX_URLS} of {len(out)}")
+        out = out[:MAX_URLS]
+    return out
+
+
 def _check_config(text) -> tuple[dict, list[str]]:
     """Parse an inline config, enforce the allow-list, return (cfg, notes)."""
     if isinstance(text, dict):  # defensive: a client that bypassed the schema
@@ -180,7 +280,25 @@ def _check_config(text) -> tuple[dict, list[str]]:
                                f"are: {allowed}")
 
     cfg = dict(raw)
-    cfg["url"] = _check_target(cfg.get("url"))
+    # Exactly one page source may be named (runner.page_source enforces this
+    # too, but it runs inside api.scrape, after the server has said yes).
+    sources = [key for key in ("paginate", "pages", "urls")
+               if cfg.get(key) is not None]
+    if len(sources) > 1:
+        raise _ConfigError(
+            "config sets more than one page source ("
+            + ", ".join(sources)
+            + "): use exactly one of paginate, pages, urls")
+    if "pages" in cfg:
+        cfg["pages"] = _check_pages(cfg["pages"], notes)
+    if "urls" in cfg:
+        cfg["urls"] = _check_urls(cfg["urls"], notes)
+    # A pages:/urls: config has no base url of its own; the API uses the
+    # first expanded page as the base. Only check a url that was given.
+    if cfg.get("url") is not None:
+        cfg["url"] = _check_target(cfg["url"])
+    elif "pages" not in cfg and "urls" not in cfg:
+        _check_target(cfg.get("url"))  # raises with the usual message
     for key in ("items", "fields", "paginate"):
         if key in cfg and not isinstance(cfg[key], dict):
             # paginate is read *after* the first page is fetched; a bad type
@@ -200,6 +318,34 @@ def _check_config(text) -> tuple[dict, list[str]]:
         cfg["timeout"] = _bounded_float(
             "timeout", cfg["timeout"], DEFAULT_TIMEOUT, MIN_TIMEOUT,
             MAX_TIMEOUT, notes)
+    if "concurrency" in cfg:
+        cfg["concurrency"] = _bounded_int(
+            "concurrency", cfg["concurrency"], 1, 1, MAX_CONCURRENCY, notes)
+    if "max_tier" in cfg:
+        try:
+            asked_over = int(cfg["max_tier"]) > MAX_TIER
+        except (TypeError, ValueError, OverflowError):
+            asked_over = False
+        cfg["max_tier"] = _bounded_int(
+            "max_tier", cfg["max_tier"], MAX_TIER, 1, MAX_TIER, notes)
+        if asked_over:
+            notes.append(
+                f"tier 3 is not reachable through the MCP guard; "
+                f"max_tier stays at {MAX_TIER}")
+    if "max_retries" in cfg:
+        cfg["max_retries"] = _bounded_int(
+            "max_retries", cfg["max_retries"], DEFAULT_MAX_RETRIES, 0,
+            MAX_MAX_RETRIES, notes)
+    # Always pinned: the ladder's own default is 300 s, which is fine on the
+    # CLI and unacceptable inline on the server. Applied silently when the
+    # config omits the key (the cap is the server's, not the user's value).
+    cfg["cooldown_sec"] = _bounded_float(
+        "cooldown_sec", cfg.get("cooldown_sec", DEFAULT_COOLDOWN),
+        DEFAULT_COOLDOWN, 0.0, MAX_COOLDOWN, notes)
+    if "per_proxy_rate_sec" in cfg:
+        cfg["per_proxy_rate_sec"] = _bounded_float(
+            "per_proxy_rate_sec", cfg["per_proxy_rate_sec"], 1.0, 0.0,
+            MAX_PER_PROXY_RATE, notes)
 
     tier = cfg.get("tier", "auto")
     if tier != "auto":
@@ -414,11 +560,16 @@ def build_server(workdir: Path, allow_private: bool = False, *, pool=None,
                max_rows: Any = DEFAULT_MAX_ROWS) -> dict:
         """Run an inline YAML/JSON scrape config and return rows plus a dataset.
 
-        `config` is config TEXT (not a path). Allowed keys: url, items,
-        fields, json, paginate, max_pages, rate_limit_sec, timeout, tier,
-        output, headers. `proxy`/`cookies`/`since`/`snapshot`/`fetcher` are
-        refused and tier is capped at 2. Per-call bounds (notes say when one
-        applied): max_pages 100, rate_limit_sec 0-30, timeout 1-120 s.
+        `config` is config TEXT (not a path). Allowed keys: url, pages,
+        urls, concurrency, items, fields, json, paginate, max_pages,
+        rate_limit_sec, timeout, tier, max_tier, max_retries, cooldown_sec,
+        per_proxy_rate_sec, output, headers. `proxy`/`proxies`/`cookies`/
+        `since`/`snapshot`/`fetcher` are refused; tiers are capped at 2.
+        A config may use pages (a {n} template range) or urls (a list)
+        instead of a top-level url. Per-call bounds (notes say when one
+        applied): max_pages 100, pages range 100, urls 100, concurrency
+        1-16, rate_limit_sec 0-30, per_proxy_rate_sec 0-30, timeout 1-120 s,
+        max_retries 0-3, cooldown_sec 0-60.
         Returns {status: complete |
         incomplete | too_few_rows | blocked | error, rows (up to max_rows,
         default 50, cap 500), row_count (the true total), dataset_path (full
