@@ -8,6 +8,14 @@ tier 3: cloakbrowser (source-patched Chromium, Amazon-class) or
 """
 from __future__ import annotations
 
+from . import __version__
+
+# Tier 1 says who it is. A Chrome UA on a client that does not connect like
+# Chrome is what bot filters flag (HN answers it with HTTP 419 on ?p=2), while
+# an honest UA gets through. Sites that need a browser identity get tier 2.
+USER_AGENT = (f"scrapeforge/{__version__} "
+              "(+https://github.com/vhsgreed/scrapeforge)")
+
 
 def fetch(url: str, tier: int, timeout: int = 30, proxy: str | None = None,
           cookies: dict | None = None) -> tuple[int, str]:
@@ -50,9 +58,7 @@ def to_url(target: str) -> str:
 def _fetch_httpx(url, timeout, proxy, cookies) -> tuple[int, str]:
     import httpx
     kwargs = dict(timeout=timeout, follow_redirects=True,
-                  headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                                         "AppleWebKit/537.36 (KHTML, like Gecko) "
-                                         "Chrome/126.0 Safari/537.36"})
+                  headers={"User-Agent": USER_AGENT})
     if proxy:
         kwargs["proxy"] = proxy
     if cookies:

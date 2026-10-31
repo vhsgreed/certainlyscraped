@@ -51,3 +51,19 @@ def test_stops_on_error_status():
     n = paginate(get_html, "https://s/a", CFG, lambda h: None)
     assert fetched == ["https://s/a", "https://s/missing"]
     assert n == 1
+
+
+def test_error_status_stop_is_logged():
+    import io
+    get_html, _ = _site({"https://s/a": _next("/missing")})
+    log = io.StringIO()
+    paginate(get_html, "https://s/a", CFG, lambda h: None, log=log)
+    assert "[paginate] stopped: HTTP 404 on https://s/missing" in log.getvalue()
+
+
+def test_normal_end_logs_nothing():
+    import io
+    get_html, _ = _site({"https://s/a": "<html>end</html>"})
+    log = io.StringIO()
+    paginate(get_html, "https://s/a", CFG, lambda h: None, log=log)
+    assert log.getvalue() == ""

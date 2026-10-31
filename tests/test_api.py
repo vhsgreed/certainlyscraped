@@ -130,3 +130,14 @@ def test_fetch_error_exits_1_without_traceback(tmp_path, capsys):
         cli.main(["run", str(path), "--out", str(tmp_path / "o.csv")])
     assert e.value.code == 1
     assert "[run] fetch error" in capsys.readouterr().err
+
+
+def test_scrape_log_reports_error_status_mid_pagination():
+    def blocked(url):
+        if url.endswith("page2.html"):
+            return 419, "Sorry"
+        return fake_fetch(url)
+    log = io.StringIO()
+    res = scrape(CFG, fetcher=blocked, log=log)
+    assert res.pages == 1
+    assert "[paginate] stopped: HTTP 419 on https://shop.test/page2.html" in log.getvalue()

@@ -89,7 +89,7 @@ def scrape(config: str | dict, *, tier: int | None = None,
                 seen.add(key)
                 rows.append(item)
 
-    pages = paginate(fetcher, cfg["url"], cfg, on_page)
+    pages = paginate(fetcher, cfg["url"], cfg, on_page, log=log)
     if log:
         print(f"[done] {pages} pages, {len(rows)} unique items", file=log)
     return ScrapeResult(rows, pages, tier, cfg)

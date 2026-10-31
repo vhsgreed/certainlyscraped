@@ -105,8 +105,9 @@ def probe(url: str, timeout: int = 25) -> ProbeResult:
 def _probe(url: str, timeout: int) -> ProbeResult:
     try:
         import httpx
+        from .fetch import USER_AGENT
         r = httpx.get(url, timeout=timeout, follow_redirects=True,
-                      headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+                      headers={"User-Agent": USER_AGENT})
         res = classify_response(url, r.status_code, r.text)
         res._body = r.text
         if res.tier <= 1:

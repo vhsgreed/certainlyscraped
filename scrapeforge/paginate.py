@@ -5,11 +5,13 @@ import time
 from urllib.parse import urljoin
 
 
-def paginate(get_html, base_url: str, cfg: dict, on_page) -> int:
+def paginate(get_html, base_url: str, cfg: dict, on_page, log=None) -> int:
     """Calls get_html(url) -> html, on_page(html) per page.
 
     cfg pagination keys:
       selector, attribute (default 'href'), next_text (optional), max_pages
+    log: stream for a line when an error status ends pagination early
+         (a block or rate limit otherwise looks like the last page).
     Returns number of pages fetched.
     """
     pag = cfg.get("paginate") or {}
@@ -24,6 +26,8 @@ def paginate(get_html, base_url: str, cfg: dict, on_page) -> int:
     while url and pages < max_pages:
         status, html = get_html(url)
         if status >= 400:
+            if log:
+                print(f"[paginate] stopped: HTTP {status} on {url}", file=log)
             break
         pages += 1
         on_page(html)
