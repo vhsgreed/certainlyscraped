@@ -91,7 +91,7 @@ when that rung fails.
 | rate limited (429, or 419 without a challenge) | try the page through another proxy group; if there is none, wait once (`Retry-After`, else `cooldown_sec`) and retry. Prints `[ladder] <host>: rate limited, waiting <n>s` |
 | challenge page (Cloudflare, PerimeterX, DataDome markers) | keep the proxy, raise the tier by one, up to `max_tier` |
 | plain 403 | try another proxy group first; with none left, raise the tier |
-| 5xx | keep the proxy, retry once at the same tier, then raise the tier |
+| 5xx | an error page keeps the proxy: retry once at the same tier, then raise the tier. A short 503 (body under 20 kB) is classified as a block instead, not an error, so it gets no same-tier retry: it buys another proxy group when one exists, otherwise it raises the tier |
 | no response (refused, DNS, TLS, reset) | with a pool, try another proxy group once; then, pool or not, retry once at the same tier, then raise the tier |
 
 Every group switch also prints `[ladder] <host>: <reason>, trying another proxy
@@ -257,8 +257,9 @@ A password inside an inline `proxy:`/`proxies:` URL in the committed YAML is
 refused with a message naming both alternatives. Page outcomes and MCP
 responses carry the group label, never the proxy URL or password. A page that
 failed on a dead proxy keeps the transport error as its note, for example
-`ConnectionError: Failed to perform, curl: (7) Failed to connect to *** over
-proxy *** ...` (the proxy address is `***`); an unresolvable host reads
+`ConnectionError: Failed to perform, curl: (7) Failed to connect to
+books.toscrape.com:443 over proxy *** ...` (the target is kept, the proxy
+address is `***`); an unresolvable host reads
 `DNSError: ... Could not resolve host: no-such-host.invalid ...`. No log line
 quotes a proxy address, so the group label and the error text are the
 diagnosis. A private address refused by the MCP guard is terminal: one

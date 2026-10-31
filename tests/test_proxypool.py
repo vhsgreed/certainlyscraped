@@ -72,6 +72,25 @@ def test_groups_from_a_proxies_file():
     assert pool.groups() == ["dc-a", "net-1", "net-2", "net-3", "net-4"]
 
 
+def test_unlabelled_proxies_are_grouped_by_network():
+    """Two proxies in one /16 share a derived group; another /16 is net-2."""
+    pool = ProxyPool.from_config(
+        {"proxies": ["http://10.1.2.3:8000",
+                     "http://10.1.9.9:8000",
+                     "http://10.2.3.4:8000"]}, env={})
+    assert pool is not None
+    assert pool.groups() == ["net-1", "net-2"]
+    # exclude the other group to read one group's members without a rotation
+    one, two = pool.alternate("h.test", {"net-2"}), \
+        pool.alternate("h.test", {"net-2"})
+    other = pool.alternate("h.test", {"net-1"})
+    assert one is not None and two is not None and other is not None
+    assert {one.group, two.group} == {"net-1"}
+    assert {one.url, two.url} == {"http://10.1.2.3:8000",
+                                  "http://10.1.9.9:8000"}
+    assert (other.group, other.url) == ("net-2", "http://10.2.3.4:8000")
+
+
 def test_derived_group_labels_are_neutral():
     """R46: no hostname and no /16 reaches steps or proxy_group."""
     pool = ProxyPool.from_config(
@@ -732,10 +751,19 @@ def test_proxies_file_rejects_a_bad_line_with_its_number(tmp_path):
 # --- item 8: --no-proxy is absolute --------------------------------------
 
 def test_use_env_false_ignores_the_environment():
-    pool = ProxyPool.from_config(
-        {"proxies": ["http://cfg:1"]},
-        env={"CERTAINLYSCRAPED_PROXIES": "http://env:1"}, use_env=False)
-    assert pool.groups() == ["net-1"]  # R46: derived labels are neutral
+    cfg = {"proxies": ["http://cfg:1"]}
+    env = {"CERTAINLYSCRAPED_PROXIES": "http://env:1"}
+    off = ProxyPool.from_config(cfg, env=env, use_env=False)
+    # R46: derived labels are neutral, so the label alone proves nothing:
+    # the address has to be the config's, and the environment's absent.
+    assert off is not None
+    assert off.groups() == ["net-1"]
+    proxy = off.acquire("h.test")
+    assert proxy is not None and proxy.url == "http://cfg:1"
+    on = ProxyPool.from_config(cfg, env=env, use_env=True)
+    assert on is not None
+    proxy = on.acquire("h.test")
+    assert proxy is not None and proxy.url == "http://env:1"
 
 
 def test_no_proxy_beats_the_env_var(tmp_path, monkeypatch):

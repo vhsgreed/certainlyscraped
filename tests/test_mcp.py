@@ -161,13 +161,18 @@ def test_scrape_rejects_non_http_url(tmp_path):
 
 
 def test_scrape_rejects_non_mapping_config(tmp_path):
+    seen = []
+
     def fake_scrape(cfg, *, guard=None, log=None, **kwargs):  # pragma: no cover
+        seen.append(cfg)
         raise RuntimeError("must not run")
 
-    res, _ = call(build_server(tmp_path, _scrape=fake_scrape), "scrape",
-                  {"config": "- just\n- a list\n"})
+    res, raw = call(build_server(tmp_path, _scrape=fake_scrape), "scrape",
+                    {"config": "- just\n- a list\n"})
     assert res["status"] == "error"
-    assert res["notes"]
+    assert "mapping" in notes(res)
+    assert not raw.is_error
+    assert seen == []
 
 
 # -- 4. scrape happy path, truncation and the dataset file ------------------

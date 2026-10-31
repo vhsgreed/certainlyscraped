@@ -163,6 +163,31 @@ def test_sticky_level_per_host():
     assert ladder.level("other.test") == 1
 
 
+@pytest.mark.parametrize("with_pool", [False, True])
+def test_an_error_climb_is_not_remembered(with_pool):
+    """R45: only a challenge/403 tier sticks, not one bought by no response."""
+    # cooldown 0: the dead proxy is not parked, so page 2 shows the level alone
+    pool = (pool_for(["http://10.0.0.1:8000 # a"], cooldown_sec=0)[0]
+            if with_pool else None)
+    suffix = "@a" if with_pool else ""
+
+    def fetch_fn(url, tier, **kwargs):
+        if url.endswith("/a"):
+            raise FetchError("ConnectError: connection refused")
+        return 200, OK
+
+    ladder = _ladder_with(fetch_fn, cfg={"max_tier": 2}, pool=pool)
+    first = ladder.fetch_page("https://h.test/a")
+    # t1 error, same-tier retry, climb to t2 (remember = False), retry
+    assert first.steps == [f"t1{suffix}", f"t1{suffix}",
+                           f"t2{suffix}", f"t2{suffix}"]
+    assert first.note == "ConnectError: connection refused"  # R42
+    assert ladder.level("h.test") == 1
+
+    second = ladder.fetch_page("https://h.test/b")
+    assert second.steps == [f"t1{suffix}"]
+
+
 def test_max_tier_caps_and_notes():
     ladder, _, _ = make([(403, CHALLENGE), (403, CHALLENGE)],
                         cfg={"max_tier": 2})
