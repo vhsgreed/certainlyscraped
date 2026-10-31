@@ -1,0 +1,15 @@
+name: hn-pages
+url: https://news.ycombinator.com/news?p=1
+tier: 1
+pages:
+  template: "https://news.ycombinator.com/news?p={n}"
+  from: 1
+  to: 4
+concurrency: 2
+rate_limit_sec: 1.0
+items:
+  selector: "tr.athing"
+fields:
+  title: { selector: "span.titleline a", attr: text }
+  url:   { selector: "span.titleline a", attr: href }
+output: csv

@@ -24,6 +24,7 @@ from .extract import extract_page
 from .fetch import fetch as _fetch
 from .outcome import PageFetch, PageOutcome, scrape_status, summary_line
 from .paginate import follow_links
+from .runner import page_source, run_parallel
 
 Fetcher = Callable[[str], "tuple[int, str]"]
 
@@ -90,6 +91,11 @@ def scrape(config: str | dict, *, tier: int | None = None,
            network policy.
     """
     cfg = load_config(config)
+    kind, urls = page_source(cfg, log=log)
+    if not cfg.get("url"):
+        # pages/urls configs carry no base url; the first page is the base
+        # for the tier probe and for logging.
+        cfg = dict(cfg, url=urls[0])
     if tier is None:
         tier = 1 if fetcher else resolve_tier(cfg, log, guard=guard)
     if fetcher is None:
@@ -112,8 +118,12 @@ def scrape(config: str | dict, *, tier: int | None = None,
                 added += 1
         return added
 
-    outcomes = follow_links(as_page_fetcher(fetcher, tier), cfg["url"], cfg,
-                            on_page, log=log)
+    fetch_page = as_page_fetcher(fetcher, tier)
+    if kind == "links":
+        outcomes = follow_links(fetch_page, cfg["url"], cfg, on_page, log=log)
+    else:
+        outcomes = run_parallel(fetch_page, urls, cfg, on_page, log=log,
+                                stop_on_trailing=(kind == "range"))
     pages = sum(1 for o in outcomes if o.status < 400)
     if log:
         print(summary_line(outcomes), file=log)

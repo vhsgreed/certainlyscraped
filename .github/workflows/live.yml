@@ -21,6 +21,8 @@ jobs:
         include:
           - config: examples/hn-front.yaml
             min_rows: 60
+          - config: examples/hn-pages.yaml
+            min_rows: 90
           - config: examples/books-toscrape.yaml
             min_rows: 60
           - config: examples/quotes-toscrape.yaml
