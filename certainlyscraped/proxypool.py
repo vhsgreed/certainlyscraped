@@ -43,7 +43,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 from .fetch import redact
 
@@ -51,6 +51,16 @@ DEFAULT_COOLDOWN_SEC = 300
 DEFAULT_GROUP = "default"
 DEFAULT_GATEWAY_GROUP = "gateway"
 ENV_PROXIES = "CERTAINLYSCRAPED_PROXIES"
+
+# Scalar tuning keys that may sit in the same mapping as the proxies
+# (spec section 5). They are read by the pool and by the ladder; a group
+# cannot be named after one.
+TUNING_KEYS = ("per_proxy_rate_sec", "cooldown_sec", "max_retries")
+
+# Where a password is allowed to live (R31): a proxies file or the
+# environment. Never the main config, which is the file people commit.
+PASSWORD_HINT = ("move it to a proxies file passed with --proxies, or use a "
+                 "gateway template with password_env")
 
 # Outcomes that park a (proxy, host) pair. Anything else (ok, not_found) is a
 # vote of confidence and clears the cooldown.
@@ -62,7 +72,9 @@ MAX_TOKEN_SECRETS = 512
 
 # "url # label" / "url #label": the label is the group name.
 _LABEL = re.compile(r"\s+#\s*")
-_URL_PASSWORD = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*://[^/:@]*:([^@]*)@")
+# The password runs to the LAST '@' in the authority: a password may itself
+# contain one ('http://u:p@ss@h:1' has the password 'p@ss').
+_URL_PASSWORD = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*://[^/:@]*:(.*)@")
 
 _GATEWAY_KEYS = frozenset({"template", "url", "password_env", "session",
                            "label", "password"})
@@ -103,6 +115,7 @@ class Gateway:
             raise ValueError("gateway: set password_env, not password -- the "
                              "password is read from the environment and never "
                              "from the config")
+        _reject_template_password(template)
         env_name = cfg.get("password_env")
         if not isinstance(env_name, str) or not env_name:
             raise ValueError("gateway: password_env is required (the name of "
@@ -111,6 +124,11 @@ class Gateway:
             raise ValueError(f"gateway: environment variable {env_name} is "
                              "not set")
         self.password = str(env[env_name])
+        # The URL is built with percent-encoded credentials, so a password
+        # containing '@', ':' or '/' cannot split the userinfo (R32b).
+        self.encoded_password = quote(self.password, safe="")
+        self.host = None if cfg.get("host") is None else str(cfg["host"])
+        self.port = None if cfg.get("port") is None else str(cfg["port"])
         self.template = template
         self.label = str(cfg.get("label") or DEFAULT_GATEWAY_GROUP)
         self.session = str(cfg.get("session", "rotate")).strip().lower()
@@ -128,10 +146,34 @@ class Gateway:
 
     def build(self, token: str) -> str:
         values = dict(self.fields)
-        values["session"] = token
-        values["pass"] = self.password
-        values["password"] = self.password
+        for key in ("user", "password", "pass", "session"):
+            if key in values:
+                values[key] = quote(values[key], safe="")
+        values["session"] = quote(token, safe="")
+        values["pass"] = values["password"] = self.encoded_password
+        if "user" not in values:
+            values["user"] = ""
         return self.template.format(**values)
+
+
+def _reject_template_password(template: str) -> None:
+    """A gateway template is main-config text: no literal password in it (R31).
+
+    ``{password}`` (or ``{pass}``) is the only way a credential gets into the
+    built URL, and it comes from ``password_env``.
+    """
+    authority = template.split("://", 1)[-1].split("/", 1)[0]
+    if "@" not in authority:
+        return
+    userinfo = authority.rpartition("@")[0]
+    if ":" not in userinfo:
+        return
+    literal = re.sub(r"\{[^}]*\}", "", userinfo.split(":", 1)[1]).strip()
+    if literal:
+        raise ValueError("gateway: a literal password in the template is "
+                         "refused (the config is usually committed): use the "
+                         "{password} placeholder with password_env, or " +
+                         PASSWORD_HINT)
 
 
 def _placeholders(template: str) -> list[str]:
@@ -160,6 +202,10 @@ class ProxyPool:
         # newest MAX_TOKEN_SECRETS are enough to redact with.
         self._passwords: list[str] = []
         self._tokens: list[str] = []
+        # Every address the pool itself knows: the URL, host:port and the
+        # bare host. netguard says "private address: 10.1.2.3", a client
+        # quotes the URL, and a sandbox error says "gw.example" (R32a).
+        self._addresses: list[str] = []
         for label, urls in groups.items():
             urls = [str(url) for url in urls]
             if not urls:
@@ -167,35 +213,52 @@ class ProxyPool:
             self._groups[str(label)] = urls
             for url in urls:
                 _append(self._passwords, _password_of(url))
+                _append(self._addresses, url)
+                _append(self._addresses, _netloc(url))
+                _append_host(self._addresses, _hostname(url))
         for gateway in gateways:
             if gateway.label in self._groups or gateway.label in self._gateways:
                 raise ValueError("proxy group label is used twice: "
                                  f"{gateway.label!r}")
             self._gateways[gateway.label] = gateway
             _append(self._passwords, gateway.password)
+            _append(self._passwords, gateway.encoded_password)
+            if gateway.host:
+                _append_host(self._addresses, gateway.host)
+                if gateway.port:
+                    _append(self._addresses, f"{gateway.host}:{gateway.port}")
         self._order = list(self._groups) + list(self._gateways)
         self._turn = {label: 0 for label in self._order}
         self._rr = 0
         self._cooling: dict[tuple, float] = {}
-        self._sticky: dict[tuple[str, str], str] = {}
+        self._sticky: dict[tuple, str] = {}
 
     # -- construction ------------------------------------------------------
 
     @classmethod
     def from_config(cls, cfg: dict, env=None, base_dir: str = ".",
-                    *, clock=time.monotonic, token_factory=None):
+                    *, allow_userinfo: bool = False, use_env: bool = True,
+                    clock=time.monotonic, token_factory=None):
         """The pool a config asks for, or None when it names no proxy.
 
         ``CERTAINLYSCRAPED_PROXIES`` (a newline/comma separated list) replaces
-        the config's ``proxies`` value when it is set.
+        the config's ``proxies`` value when ``use_env`` is true; ``--no-proxy``
+        passes ``use_env=False`` so the environment cannot re-enable a proxy
+        the operator just switched off.
+
+        ``allow_userinfo`` says the proxy list came from a dedicated proxies
+        file (or the environment), where a password is allowed. A password
+        inline in the main config is refused (R31).
         """
         cfg = cfg or {}
         env = os.environ if env is None else env
         raw = cfg.get("proxies")
-        override = (env or {}).get(ENV_PROXIES) if env is not None else None
+        override = ((env or {}).get(ENV_PROXIES)
+                    if (env is not None and use_env) else None)
         if override:
             raw = [part.strip() for part in re.split(r"[,\n]", override)
                    if part.strip()]
+            allow_userinfo = True  # the environment is a dedicated channel
         default_group = None
         if raw is None:
             single = cfg.get("proxy")
@@ -206,7 +269,9 @@ class ProxyPool:
                 default_group = DEFAULT_GROUP
         if raw is None:
             return None
-        entries, gateways = _read(raw, env, base_dir)
+        tuning = _tuning(raw, cfg)
+        entries, gateways = _read(raw, env, base_dir,
+                                  allow_userinfo=allow_userinfo)
         groups: dict[str, list[str]] = {}
         for url, label in entries:
             group = label or default_group or _derive_group(url)
@@ -214,8 +279,9 @@ class ProxyPool:
         built = [Gateway(spec, env) for spec in gateways]
         if not groups and not built:
             return None
-        return cls(groups, built, cooldown_sec=_cooldown(cfg), clock=clock,
-                   token_factory=token_factory)
+        return cls(groups, built,
+                   cooldown_sec=_cooldown(tuning.get("cooldown_sec")),
+                   clock=clock, token_factory=token_factory)
 
     # -- queries -----------------------------------------------------------
 
@@ -233,13 +299,7 @@ class ProxyPool:
         if not text:
             return text
         with self._lock:
-            targets = self._passwords + self._tokens
-            for urls in self._groups.values():
-                for url in urls:
-                    targets.append(url)
-                    netloc = _netloc(url)
-                    if netloc:
-                        targets.append(netloc)
+            targets = self._passwords + self._tokens + self._addresses
         return redact(text, targets)
 
     # -- handing out -------------------------------------------------------
@@ -324,7 +384,9 @@ class ProxyPool:
 
     def _token_for(self, host: str, gateway: Gateway) -> str:
         if gateway.session == "sticky":
-            key = (host, gateway.label)
+            # Spec s5: one session per (host, worker) -- a worker keeps its
+            # identity across pages, two workers never share one (R30).
+            key = (host, threading.get_ident())
             token = self._sticky.get(key)
             if token is None:
                 token = self._token()
@@ -342,11 +404,33 @@ def _append(values: list[str], value) -> None:
         values.append(str(value))
 
 
+def _append_host(values: list[str], host) -> None:
+    """Scrub a bare hostname, unless it is too short to be told from a word.
+
+    ``10.1.2.3`` and ``gw.example`` are always masked; a single-label name is
+    masked from four characters up. Anything shorter would replace ordinary
+    prose ("a", "gw") all over a log, and ``host:port`` plus the URL still
+    name the proxy unambiguously.
+    """
+    if not host:
+        return
+    host = str(host)
+    if len(host) >= 4 or "." in host or ":" in host:
+        _append(values, host)
+
+
 # --- config parsing -------------------------------------------------------
 
-def _cooldown(cfg: dict) -> float:
-    value = cfg.get("cooldown_sec", DEFAULT_COOLDOWN_SEC)
-    if isinstance(value, bool) or value is None:
+def _tuning(raw, cfg: dict) -> dict:
+    """The scalar tuning keys: from the ``proxies`` block, else the top level."""
+    block = raw if isinstance(raw, dict) else {}
+    return {key: block.get(key, cfg.get(key)) for key in TUNING_KEYS}
+
+
+def _cooldown(value) -> float:
+    if value is None:
+        return DEFAULT_COOLDOWN_SEC
+    if isinstance(value, bool):
         raise ValueError(f"cooldown_sec must be a number, got {value!r}")
     try:
         return float(value)
@@ -355,37 +439,45 @@ def _cooldown(cfg: dict) -> float:
             from None
 
 
-def _read(raw, env, base_dir):
+def _read(raw, env, base_dir, *, allow_userinfo: bool = False):
     """(entries, gateway specs) from any accepted ``proxies`` shape."""
     entries: list[tuple[str, str | None]] = []
     gateways: list[dict] = []
-    if isinstance(raw, str):
-        entry = _entry(raw)
+
+    def add(item, label=None):
+        entry = _entry(item, allow_userinfo, default_label=label)
         if entry:
             entries.append(entry)
+
+    if isinstance(raw, str):
+        add(raw)
     elif isinstance(raw, (list, tuple)):
         for item in raw:
-            entry = _entry(item)
-            if entry:
-                entries.append(entry)
+            add(item)
     elif isinstance(raw, dict):
         for key, value in raw.items():
             name = str(key)
+            if name in TUNING_KEYS:
+                continue
             if name == "gateway":
                 for spec in (value if isinstance(value, (list, tuple))
                              else [value]):
                     if not isinstance(spec, dict):
-                        raise ValueError("proxies.gateway must be a mapping")
+                        raise ValueError(
+                            "proxies.gateway is reserved for a gateway "
+                            "mapping; a group cannot be named 'gateway'")
                     gateways.append(spec)
-            elif name == "list" and isinstance(value, (str, os.PathLike)):
+            elif name == "list":
+                if not isinstance(value, (str, os.PathLike)):
+                    raise ValueError(
+                        "proxies.list is reserved for a file path; a group "
+                        "cannot be named 'list' (label a list entry instead)")
                 entries.extend(_file_entries(value, base_dir))
             elif isinstance(value, (list, tuple)):
                 for item in value:
-                    entry = _entry(item)
-                    if entry:
-                        entries.append((entry[0], entry[1] or name))
+                    add(item, name)
             elif isinstance(value, str):
-                entries.append((value, name))
+                add(value, name)
             else:
                 raise ValueError(f"proxies.{name} must be a list of URLs")
     else:
@@ -393,21 +485,39 @@ def _read(raw, env, base_dir):
     return entries, gateways
 
 
-def _entry(item) -> tuple[str, str | None] | None:
+def _entry(item, allow_userinfo: bool = False,
+           default_label: str | None = None):
     """One "url # label" entry -> (url, label); comments are None."""
     if not isinstance(item, str):
         raise ValueError(f"proxy entry must be a string, got {item!r}")
-    text = item.strip()
+    text = _unbullet(item.strip())
     if not text or text.startswith("#"):
         return None
     match = _LABEL.search(text)
     if match is None:
-        return text, None
-    label = text[match.end():].strip()
-    url = text[:match.start()].strip()
+        url, label = text, None
+    else:
+        label = text[match.end():].strip() or None
+        url = text[:match.start()].strip()
     if not url:
         return None
-    return url, (label or None)
+    if not allow_userinfo:
+        _reject_password(url)
+    return url, (label or default_label)
+
+
+def _reject_password(url: str) -> None:
+    """A password belongs in a proxies file, never in the main config (R31)."""
+    if _password_of(url) is None:
+        return
+    raise ValueError(
+        "a password in a proxy URL is refused in the main config (the file "
+        "is usually committed): " + PASSWORD_HINT)
+
+
+def _unbullet(text: str) -> str:
+    """Strip the '- ' of a YAML block-list item."""
+    return re.sub(r"^-[ \t]+", "", text).strip()
 
 
 def _file_entries(path, base_dir) -> list[tuple[str, str | None]]:
@@ -415,10 +525,15 @@ def _file_entries(path, base_dir) -> list[tuple[str, str | None]]:
     if not target.is_absolute():
         target = Path(base_dir) / target
     entries = []
-    for line in target.read_text(encoding="utf-8").splitlines():
-        entry = _entry(line)
-        if entry:
-            entries.append(entry)
+    for number, line in enumerate(target.read_text(encoding="utf-8")
+                                  .splitlines(), 1):
+        entry = _entry(line, allow_userinfo=True)
+        if not entry:
+            continue
+        if not _looks_like_proxy_url(entry[0]):
+            raise ValueError(f"{target}: line {number}: not a proxy URL "
+                             "(needs scheme://host:port)")
+        entries.append(entry)
     return entries
 
 
@@ -434,12 +549,34 @@ def _derive_group(url: str) -> str:
     return str(ipaddress.ip_network(f"{address}/48", strict=False))
 
 
+def _hostname(url: str) -> str | None:
+    try:
+        return urlparse(url).hostname
+    except ValueError:
+        return None
+
+
 def _netloc(url: str) -> str | None:
     """host:port for a proxy URL: the address without any credentials."""
-    parts = urlparse(url)
-    if not parts.hostname:
+    try:
+        parts = urlparse(url)
+        host, port = parts.hostname, parts.port
+    except ValueError:
         return None
-    return f"{parts.hostname}:{parts.port}" if parts.port else parts.hostname
+    if not host:
+        return None
+    return f"{host}:{port}" if port else host
+
+
+def _looks_like_proxy_url(text: str) -> bool:
+    """True for a ``scheme://host`` proxy target (a password is allowed)."""
+    if "://" not in text:
+        return False
+    try:
+        parts = urlparse(text)
+        return bool(parts.scheme and parts.hostname)
+    except ValueError:
+        return False
 
 
 def _password_of(url: str) -> str | None:
@@ -452,6 +589,7 @@ def read_proxies_file(path: str):
 
     A plain list keeps its "# label" comments (YAML would eat them), so the
     lines are parsed here unless the file is an explicit YAML/JSON structure.
+    A line that is not a proxy URL is refused at load time, with its number.
     """
     text = Path(path).read_text(encoding="utf-8")
     if _looks_like_mapping(text):
@@ -467,21 +605,40 @@ def read_proxies_file(path: str):
             parsed = None
         if isinstance(parsed, list):
             return [str(item) for item in parsed]
-    entries = [line.strip() for line in text.splitlines()
-               if line.strip() and not line.strip().startswith("#")]
+        if isinstance(parsed, dict):
+            return parsed
+    entries = []
+    for number, line in enumerate(text.splitlines(), 1):
+        stripped = _unbullet(line.strip())
+        if not stripped or stripped.startswith("#"):
+            continue
+        entry = _entry(stripped, allow_userinfo=True)
+        if entry is None:
+            continue
+        if not _looks_like_proxy_url(entry[0]):
+            raise ValueError(f"{path}: line {number}: not a proxy URL "
+                             "(needs scheme://host:port)")
+        url, label = entry
+        entries.append(f"{url} # {label}" if label else url)
     if not entries:
         raise ValueError(f"{path}: no proxies found")
     return entries
 
 
 def _looks_like_mapping(text: str) -> bool:
+    """True when the first meaningful line is 'name: ...' (a YAML mapping).
+
+    A URL line ('http://p1:1') is not one: its scheme is followed by '//',
+    not by whitespace or the end of the line -- and neither is a block-list
+    item ('- http://p1:1').
+    """
     for line in text.splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
-        if "://" in stripped:
+        if stripped.startswith("-"):
             return False
-        return bool(re.match(r"^[A-Za-z0-9_.\-]+:\s*(\[|$)", stripped))
+        return bool(re.match(r"^[A-Za-z0-9_.\-]+:(\s|$)", stripped))
     return False
 
 

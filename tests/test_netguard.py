@@ -298,8 +298,12 @@ def test_scrape_default_fetcher_applies_guard():
         "tier": 1,
         "rate_limit_sec": 0,
     }
-    with pytest.raises(PrivateAddressError, match="private address"):
-        scrape(cfg, guard=lambda u: check_url(u), log=None)
+    # R28: the links path records a page-level refusal as an error outcome
+    # (it no longer lets the exception escape the API unredacted).
+    res = scrape(cfg, guard=lambda u: check_url(u), log=None)
+    assert res.rows == []
+    assert [o.outcome for o in res.page_report] == ["error"]
+    assert "private address" in res.page_report[0].note
 
 
 # --- the proxy URL is guarded too (fix round 1, R12) -----------------------
@@ -467,8 +471,12 @@ def test_scrape_guards_the_config_proxy(monkeypatch):
         "proxy": "http://169.254.169.254:80",
     }
     guard = _guard(_resolver({"public.example": [PUBLIC_V4]}))
-    with pytest.raises(PrivateAddressError, match="169.254.169.254"):
-        scrape(cfg, guard=guard, log=None)
+    # R28: a refused proxy is this page's error outcome; the guard still ran
+    # before any request, and the outcome does not echo the address (R32a).
+    res = scrape(cfg, guard=guard, log=None)
+    assert [o.outcome for o in res.page_report] == ["error"]
+    assert "private address" in res.page_report[0].note
+    assert "169.254.169.254" not in res.page_report[0].note
     assert seen == []
 
 

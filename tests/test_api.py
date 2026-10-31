@@ -122,14 +122,20 @@ def test_diff_rows_without_key_compares_whole_row():
     assert counts == {"new": 1, "changed": 0, "unchanged": 1}
 
 
-def test_fetch_error_exits_1_without_traceback(tmp_path, capsys):
+def test_fetch_error_exits_nonzero_without_traceback(tmp_path, capsys):
+    # R28: the links path turns the fetch exception into a page error
+    # outcome (like the parallel path), so the run reports zero rows and the
+    # dataset gate decides the exit code -- never a traceback, never exit 1
+    # from an uncaught ProxyError.
     cfg = dict(CFG, url="http://127.0.0.1:9/", tier=1)
     path = tmp_path / "c.json"
     path.write_text(json.dumps(cfg))
     with pytest.raises(SystemExit) as e:
         cli.main(["run", str(path), "--out", str(tmp_path / "o.csv")])
-    assert e.value.code == 1
-    assert "[run] fetch error" in capsys.readouterr().err
+    assert e.value.code == 2
+    err = capsys.readouterr().err
+    assert "Traceback" not in err
+    assert "1 error" in err
 
 
 def test_scrape_log_reports_error_status_mid_pagination():

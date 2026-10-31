@@ -15,8 +15,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from urllib.parse import urlparse
 
 from .fetch import redact as _redact
-from .outcome import (PageFetch, PageOutcome, Verdict, classify_fetch,
-                      outcome_for)
+from .outcome import PageFetch, PageOutcome, Verdict, fetch_verdict, outcome_for
 
 # Same ceiling as follow_links' max_pages: a template range is still a pager.
 RANGE_CAP = 100
@@ -224,7 +223,7 @@ def run_parallel(fetch_page, urls: list[str], cfg: dict, on_page,
 
 
 def _consume(url: str, fetched: PageFetch, on_page) -> PageOutcome:
-    verdict = classify_fetch(url, fetched.status, fetched.html)
+    verdict = fetch_verdict(url, fetched)
     # The ladder explains why it stopped (max_tier reached, tier 3 missing);
     # keep that note rather than the generic classification note.
     note = fetched.note or None

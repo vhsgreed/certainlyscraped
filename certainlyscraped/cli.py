@@ -73,22 +73,29 @@ def cmd_probe(args):
 
 
 def _run_config(args):
-    """The config `run` should use: the path, unless a proxy flag overrides it."""
+    """(config, use_env, proxies_from_file) for `run`.
+
+    A config path is returned untouched when no proxy flag is given, so every
+    other run keeps loading the file exactly once. ``--no-proxy`` is
+    absolute: it strips the config's proxies *and* makes scrape() ignore
+    CERTAINLYSCRAPED_PROXIES.
+    """
     if not getattr(args, "proxies", None) \
             and not getattr(args, "no_proxy", False):
-        return args.config  # scrape() loads it; unchanged for every other run
+        return args.config, True, False
     cfg = load_config(args.config)
     if getattr(args, "proxies", None):
-        # The file is the whole proxy set: it replaces the config's.
+        # The file is the whole proxy set: it replaces the config's, and a
+        # password in it is allowed (a proxies file is not the committed one).
         cfg = {key: value for key, value in cfg.items() if key != "proxy"}
         cfg["proxies"] = read_proxies_file(args.proxies)
-    else:
-        cfg = {key: value for key, value in cfg.items()
-               if key not in ("proxy", "proxies")}
-    return cfg
+        return cfg, True, True
+    cfg = {key: value for key, value in cfg.items()
+           if key not in ("proxy", "proxies")}
+    return cfg, False, False
 
 
-def _redact_exc(exc: BaseException, cfg) -> str:
+def _redact_exc(exc: BaseException, cfg, *, allow_userinfo: bool = False) -> str:
     """`Type: message` with any proxy credential or address removed."""
     detail = f"{type(exc).__name__}: {exc}"
     if isinstance(cfg, str):
@@ -97,7 +104,8 @@ def _redact_exc(exc: BaseException, cfg) -> str:
         except Exception:  # noqa: BLE001 - the original error is the news
             cfg = None
     try:
-        pool = ProxyPool.from_config(cfg) if isinstance(cfg, dict) else None
+        pool = (ProxyPool.from_config(cfg, allow_userinfo=allow_userinfo)
+                if isinstance(cfg, dict) else None)
     except Exception:  # noqa: BLE001 - a bad proxies config must not hide it
         pool = None
     return pool.scrub(detail) if pool is not None else redact(detail)
@@ -105,16 +113,34 @@ def _redact_exc(exc: BaseException, cfg) -> str:
 
 def cmd_run(args):
     cfg = None
+    from_file = False
+    # A relative ``proxies: {list: ...}`` in the config resolves against the
+    # config's own directory -- and against the proxies file's when --proxies
+    # supplied the whole set.
+    base_dir = str(Path(args.config).resolve().parent)
+    if getattr(args, "proxies", None):
+        base_dir = str(Path(args.proxies).resolve().parent)
     try:
-        cfg = _run_config(args)
-        result = scrape(cfg, log=sys.stderr)
+        cfg, use_env, from_file = _run_config(args)
+        kwargs = {}
+        if isinstance(cfg, dict):
+            kwargs["base_dir"] = base_dir
+        if not use_env:
+            kwargs["use_env"] = False
+        if from_file:
+            kwargs["proxies_from_file"] = True
+        result = scrape(cfg, log=sys.stderr, **kwargs)
     except (OSError, ValueError, KeyError, yaml.YAMLError) as e:
         # A YAML parse error quotes the offending line, which may hold a
         # proxy URL: same redaction as a fetch failure.
-        print(f"[run] config error: {_redact_exc(e, cfg)}", file=sys.stderr)
+        print(f"[run] config error: "
+              f"{_redact_exc(e, cfg, allow_userinfo=from_file)}",
+              file=sys.stderr)
         sys.exit(EXIT_ERROR)
     except Exception as e:  # noqa: BLE001 - network/TLS errors from any tier
-        print(f"[run] fetch error: {_redact_exc(e, cfg)}", file=sys.stderr)
+        print(f"[run] fetch error: "
+              f"{_redact_exc(e, cfg, allow_userinfo=from_file)}",
+              file=sys.stderr)
         sys.exit(EXIT_ERROR)
     cfg, rows = result.config, result.rows
 
@@ -179,8 +205,32 @@ def cmd_mcp(args):
         sys.exit(EXIT_ERROR)
     from .mcp_server import build_server
 
+    pool = _server_pool(args)
     workdir = Path(args.workdir) if args.workdir else Path.cwd()
-    build_server(workdir, allow_private=args.allow_private).run("stdio")
+    build_server(workdir, allow_private=args.allow_private,
+                 pool=pool).run("stdio")
+
+
+def _server_pool(args):
+    """The server's own proxy pool from `mcp --proxies PATH` (never an agent's).
+
+    The file is a dedicated proxies file, so its URLs may carry a password
+    (R31); the operator's environment is honoured as it is for `run`.
+    """
+    path = getattr(args, "proxies", None)
+    if not path:
+        return None
+    try:
+        pool = ProxyPool.from_config(
+            {"proxies": read_proxies_file(path)},
+            base_dir=str(Path(path).resolve().parent), allow_userinfo=True)
+    except (OSError, ValueError) as e:
+        print(f"[mcp] proxies error: {redact(str(e))}", file=sys.stderr)
+        sys.exit(EXIT_ERROR)
+    if pool is None:
+        print(f"[mcp] {path}: no proxies found", file=sys.stderr)
+        sys.exit(EXIT_ERROR)
+    return pool
 
 
 def _format_for(path: str, cfg: dict) -> str:
@@ -286,6 +336,10 @@ def main(argv=None):
     p_mcp.add_argument("--workdir", metavar="DIR", default=None,
                        help="directory the dataset files go under "
                             "(default: the current directory)")
+    p_mcp.add_argument("--proxies", metavar="PATH",
+                       help="the server's own proxy list file (YAML, or one "
+                            "URL per line with optional '# group' labels); "
+                            "agents can never supply proxies")
     p_mcp.set_defaults(func=cmd_mcp)
 
     args = p.parse_args(argv)

@@ -607,13 +607,19 @@ def test_pool_switches_group_on_rate_limit():
 
 
 def test_pool_tries_other_group_before_climbing_tier():
+    # R27 changes what the climb can do: both groups are parked for this
+    # host by the two 403s, and the ladder will not reuse a parked proxy or
+    # go out with none, so the page stops blocked at tier 1.
     pool, _ = pool_for(["http://a:1 # a", "http://b:1 # b"])
     ladder, fetch_fn, _ = make(
         [(403, FORBIDDEN), (403, FORBIDDEN), (200, OK)], pool=pool)
     page = ladder.fetch_page("https://h.test/1")
-    assert page.steps == ["t1@a", "t1@b", "t2@b"]
-    assert [c["tier"] for c in fetch_fn.calls] == [1, 1, 2]
+    assert page.steps == ["t1@a", "t1@b"]
+    assert [c["tier"] for c in fetch_fn.calls] == [1, 1]
     assert page.proxy_group == "b"
+    assert page.status == 403
+    assert page.outcome is None  # classified from the 403, which says blocked
+    assert classify_fetch("https://h.test/1", 403, FORBIDDEN).outcome == "blocked"
 
 
 def test_pool_cooldown_keeps_a_blocked_proxy_off_that_host():
@@ -628,6 +634,44 @@ def test_pool_cooldown_keeps_a_blocked_proxy_off_that_host():
     assert pool.acquire("h.test") is not None
 
 
+def test_a_page_whose_pool_is_cooling_never_fetches_from_the_origin(monkeypatch):
+    """R27: a configured pool means never crawling without a proxy."""
+    calls = []
+
+    def fake_fetch(url, tier, **kwargs):
+        calls.append((url, kwargs.get("proxy")))
+        return 403, FORBIDDEN
+
+    monkeypatch.setattr(api, "_fetch", fake_fetch)
+    cfg = {"tier": 1, "max_tier": 1, "rate_limit_sec": 0, "concurrency": 1,
+           "url": "https://h.test/1",
+           "urls": ["https://h.test/1", "https://h.test/2"],
+           "proxies": ["http://a:1 # a", "http://b:1 # b"],
+           "items": {"selector": "li"},
+           "fields": {"t": {"selector": "a"}}}
+    result = api.scrape(cfg, log=None)
+
+    # Page 1 tried both groups and parked both; page 2 never went out.
+    assert [url for url, _ in calls] == ["https://h.test/1"] * 2
+    assert all(proxy is not None for _, proxy in calls)
+    first, second = result.page_report
+    assert first.outcome == "blocked"
+    assert second.outcome == "blocked"
+    assert second.note == "no proxy available for h.test"
+    assert second.status == 0 and second.attempts == 0
+
+
+def test_a_cooling_pool_keeps_an_earlier_verdict():
+    """R27: a rate limit already seen is the page's outcome, not 'blocked'."""
+    pool, _ = pool_for(["http://a:1 # a"])
+    ladder, fetch_fn, _ = make([(429, "")], pool=pool)
+    page = ladder.fetch_page("https://h.test/1")
+    assert len(fetch_fn.calls) == 1
+    assert page.status == 429
+    assert classify_fetch("https://h.test/1", page.status, page.html).outcome \
+        == "rate_limited"
+
+
 def test_no_secret_anywhere(tmp_path, monkeypatch):
     """Review Focus 1: a proxy failure must not leak its address anywhere."""
     import httpx
@@ -636,9 +680,12 @@ def test_no_secret_anywhere(tmp_path, monkeypatch):
         raise httpx.ProxyError(f"{PROXY_URL} refused")
 
     monkeypatch.setattr(api, "_fetch", boom)
+    proxies = tmp_path / "proxies.txt"
+    proxies.write_text(PROXY_URL + "\n", encoding="utf-8")
     cfg = {"tier": 1, "rate_limit_sec": 0, "concurrency": 1,
            "url": "https://h.test/1", "urls": ["https://h.test/1"],
-           "proxies": [PROXY_URL], "items": {"selector": "li"},
+           "proxies": {"list": str(proxies)},
+           "items": {"selector": "li"},
            "fields": {"t": {"selector": "a"}}}
     import io
     log = io.StringIO()
@@ -656,13 +703,12 @@ def test_no_secret_anywhere(tmp_path, monkeypatch):
         "tier: 1\n"
         "rate_limit_sec: 0\n"
         "concurrency: 1\n"
-        "proxies:\n"
-        f"  - {PROXY_URL}\n"
         "items: {selector: li}\n"
         "fields: {t: {selector: a}}\n", encoding="utf-8")
     report = tmp_path / "report.jsonl"
     with pytest.raises(SystemExit) as exc:
-        cli.main(["run", str(cfg_path), "--out", str(tmp_path / "o.csv"),
+        cli.main(["run", str(cfg_path), "--proxies", str(proxies),
+                  "--out", str(tmp_path / "o.csv"),
                   "--report", str(report)])
     assert exc.value.code != 0
     body = report.read_text(encoding="utf-8")

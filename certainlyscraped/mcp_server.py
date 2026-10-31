@@ -13,7 +13,8 @@ ways, all deliberate:
   full JSONL dataset under `workdir/.certainlyscraped/`.
 * **The guard is always on** (`netguard.check_url`, every hop) and the tier is
   capped at 2. A browser cannot be policed per hop, and a proxy/cookie jar is
-  a server-side decision (a later `--proxies` flag), never a tool argument.
+  a server-side decision (`--proxies`, which builds the pool this module is
+  handed), never a tool argument.
 
 stdout is the JSON-RPC channel: no `print` in this module, and every call into
 the library passes `log=None`.
@@ -270,9 +271,12 @@ def _drop_name(text: str) -> str:
                      if not line.startswith("name: "))
 
 
-def build_server(workdir: Path, allow_private: bool = False, *,
+def build_server(workdir: Path, allow_private: bool = False, *, pool=None,
                  _scrape=None, _probe=None, _load_page=None) -> MCPServer:
     """A stdio-ready MCP server whose reads and writes stay in `workdir`.
+
+    ``pool`` is the server operator's own ProxyPool (`mcp --proxies`): every
+    scrape goes through it, and an agent's config can never name a proxy.
 
     _scrape/_probe/_load_page are test seams with the signatures of
     api.scrape / classify.probe / assist.load_page; production leaves them None.
@@ -429,7 +433,10 @@ def build_server(workdir: Path, allow_private: bool = False, *,
                                       DEFAULT_MAX_ROWS, 1, MAX_ROWS_CAP)
             notes += more
 
-            result = scrape_impl(cfg, guard=guard, log=None)
+            call = {"guard": guard, "log": None}
+            if pool is not None:
+                call["pool"] = pool
+            result = scrape_impl(cfg, **call)
             rows = _jsonable(list(getattr(result, "rows", []) or []))
             row_count = len(rows)
             try:

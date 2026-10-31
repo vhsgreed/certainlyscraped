@@ -17,6 +17,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable
 
 import yaml
@@ -35,6 +36,13 @@ Fetcher = Callable[[str], "tuple[int, str]"]
 
 @dataclass
 class ScrapeResult:
+    """What one scrape produced.
+
+    Residual: ``config`` is the caller's own config, unchanged. ``repr`` hides
+    it, but ``asdict()``/``dataclasses.fields`` still expose it -- and the
+    caller's config can name a proxies *file*, never a password (R31).
+    """
+
     rows: list[dict]
     pages: int
     tier: int
@@ -107,7 +115,9 @@ class _ScrubbingLog:
 
 def scrape(config: str | dict, *, tier: int | None = None,
            fetcher: Fetcher | None = None, log=sys.stderr,
-           guard=None) -> ScrapeResult:
+           guard=None, pool=None, use_env: bool = True,
+           base_dir: str | None = None,
+           proxies_from_file: bool = False) -> ScrapeResult:
     """Fetch every page the config paginates over and extract its items.
 
     tier: override the config's tier (skips the probe). The ladder starts
@@ -119,11 +129,23 @@ def scrape(config: str | dict, *, tier: int | None = None,
            built-in fetcher to the probe and to every fetch hop. It is NOT
            applied to a caller-supplied `fetcher`; that fetcher owns its own
            network policy.
+    pool: a ready-made ProxyPool (the MCP server's own --proxies); when None
+          the config's proxy:/proxies: builds one for this run only.
+    use_env: False means CERTAINLYSCRAPED_PROXIES is ignored (--no-proxy).
+    base_dir: directory a relative ``proxies: {list: ...}`` path resolves
+              against; defaults to the config file's own directory.
+    proxies_from_file: the proxy list came from a dedicated proxies file, so
+              a password in its URLs is allowed (R31).
     """
     cfg = load_config(config)
+    if base_dir is None and isinstance(config, str):
+        base_dir = str(Path(config).resolve().parent)
     # A proxy config (proxy:/proxies:) becomes a pool for this run only; a
     # stateful pool must never outlive the scrape that built it.
-    pool = ProxyPool.from_config(cfg) if fetcher is None else None
+    if pool is None and fetcher is None:
+        pool = ProxyPool.from_config(cfg, base_dir=base_dir or ".",
+                                     allow_userinfo=proxies_from_file,
+                                     use_env=use_env)
 
     # A pool knows its secrets and its own addresses; a pool that does not
     # (a test double) still gets the generic credential mask.

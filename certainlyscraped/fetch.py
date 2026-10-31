@@ -23,8 +23,10 @@ USER_AGENT = (f"certainlyscraped/{__version__} "
 MAX_REDIRECTS = 10
 _REDIRECT_CODES = frozenset({301, 302, 303, 307, 308})
 
-# scheme://user:password@  -- the credentials half of a proxy URL in a message.
-_CREDENTIALS = re.compile(r"([A-Za-z][A-Za-z0-9+.\-]*://)[^/\s@]+@")
+# scheme://user:password@ -- the credentials half of a proxy URL in a
+# message. The userinfo runs to the LAST '@' in the authority, so a password
+# that itself contains '@' is masked whole rather than half-masked.
+_CREDENTIALS = re.compile(r"([A-Za-z][A-Za-z0-9+.\-]*://)[^/\s]*@")
 
 
 def redact(text: str, secrets=()) -> str:

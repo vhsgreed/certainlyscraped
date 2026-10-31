@@ -25,7 +25,12 @@ _COUNT_ORDER = ("ok", "empty", "not_found", "blocked", "rate_limited", "error")
 
 @dataclass
 class PageFetch:
-    """One fetched page, before extraction."""
+    """One fetched page, before extraction.
+
+    ``outcome`` is the fetcher's own verdict when it knows one without a
+    response (the ladder stopped because no proxy was available); otherwise
+    the runner classifies the page from status and body.
+    """
 
     status: int
     html: str
@@ -34,6 +39,7 @@ class PageFetch:
     proxy_group: str | None = None
     elapsed_ms: int = 0
     note: str = ""
+    outcome: str | None = None
 
 
 @dataclass
@@ -99,6 +105,20 @@ def classify_fetch(url: str, status: int, html: str) -> Verdict:
     # Remaining 2xx/3xx: a full-size body with a block signature is a real
     # page that only needs TLS impersonation (probe.note says so).
     return Verdict("ok", probe.note)
+
+
+def fetch_verdict(url: str, fetched: PageFetch | None) -> Verdict:
+    """The verdict for a fetched page: the fetcher's own when it set one.
+
+    A ladder that stopped without a response (no proxy available for this
+    host) knows the page is blocked even though its status is 0; every other
+    page is classified from status and body as before.
+    """
+    if fetched is None:
+        return Verdict("error", "no response")
+    if fetched.outcome:
+        return Verdict(str(fetched.outcome), fetched.note or "")
+    return classify_fetch(url, fetched.status, fetched.html)
 
 
 def outcome_for(url: str, fetched: PageFetch | None, verdict: Verdict,

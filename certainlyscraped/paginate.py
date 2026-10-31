@@ -9,8 +9,12 @@ from __future__ import annotations
 
 from urllib.parse import urljoin, urlparse
 
-from .outcome import PageFetch, PageOutcome, classify_fetch, outcome_for
+from .fetch import redact
+from .outcome import PageFetch, PageOutcome, Verdict, fetch_verdict, outcome_for
 from .runner import DEFAULT_GATE, RateGate
+
+# A page that ended this way stops the walk: the next link is unreachable.
+_STOP_PAGE = frozenset({"blocked", "rate_limited", "error", "not_found"})
 
 
 def follow_links(fetch_page, base_url: str, cfg: dict, on_page,
@@ -41,9 +45,19 @@ def follow_links(fetch_page, base_url: str, cfg: dict, on_page,
     while url and pages < max_pages:
         if gate is not None:
             gate.wait((urlparse(url).hostname or "", None))
-        fetched = fetch_page(url)
-        verdict = classify_fetch(url, fetched.status, fetched.html)
-        if fetched.status >= 400:
+        try:
+            fetched = fetch_page(url)
+        except Exception as exc:  # noqa: BLE001 - one page, not the whole run
+            # R28: the links path records a bad page exactly as the parallel
+            # runner does, and the message is scrubbed before it is logged or
+            # put in an outcome (a client quotes its proxy URL verbatim).
+            detail = redact(f"{type(exc).__name__}: {exc}")
+            if log:
+                print(f"[paginate] {url}: {detail}", file=log)
+            outcomes.append(outcome_for(url, None, Verdict("error", detail)))
+            break
+        verdict = fetch_verdict(url, fetched)
+        if fetched.status >= 400 or verdict.outcome in _STOP_PAGE:
             # Recorded, then stop: the rest of the pagination is unreachable.
             outcomes.append(outcome_for(url, fetched, verdict,
                                        note=fetched.note or None))

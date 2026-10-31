@@ -79,6 +79,24 @@ def escalate_tier3_usable(ladder) -> bool:
     return ladder.guard is None and tier3_available()
 
 
+def _proxies_block(cfg: dict) -> dict:
+    """The ``proxies`` mapping, when the config uses one (spec section 5)."""
+    block = cfg.get("proxies")
+    return block if isinstance(block, dict) else {}
+
+
+def _tuned(cfg: dict, key: str, default):
+    """A value from the ``proxies`` block first, then the top level.
+
+    Spec s5 puts ``per_proxy_rate_sec``/``max_retries``/``cooldown_sec`` in
+    the same block as the proxy list; the top-level key still works.
+    """
+    block = _proxies_block(cfg)
+    if key in block:
+        return block[key]
+    return cfg.get(key, default)
+
+
 def _group_of(proxy) -> str | None:
     """The pool labels proxies by group; a bare string proxy has none."""
     if proxy is None:
@@ -129,14 +147,14 @@ class Ladder:
         self.start_tier = _clamp(start_tier, 1, MAX_TIER, "start_tier")
         self.max_tier = _clamp(cfg.get("max_tier", DEFAULT_MAX_TIER),
                                1, MAX_TIER, "max_tier")
-        self.max_retries = _clamp(cfg.get("max_retries", DEFAULT_MAX_RETRIES),
+        self.max_retries = _clamp(_tuned(cfg, "max_retries", DEFAULT_MAX_RETRIES),
                                   0, MAX_RETRIES, "max_retries")
         if self.start_tier == MAX_TIER and not escalate_tier3_usable(self):
             # A probed/config tier 3 we cannot run starts at 2 instead; the
             # ladder then stops with "tier 3 not available" if 2 is blocked.
             self.start_tier = MAX_TIER - 1
         self.cooldown_sec = max(0.0, _number(
-            cfg.get("cooldown_sec", DEFAULT_COOLDOWN_SEC), "cooldown_sec"))
+            _tuned(cfg, "cooldown_sec", DEFAULT_COOLDOWN_SEC), "cooldown_sec"))
         self.pool = pool
         self.fetch_fn = fetch_fn
         self.sleep = sleep
@@ -149,7 +167,8 @@ class Ladder:
         # The ladder is the only pacer: run_parallel/follow_links get
         # gate=None so one attempt is never waited for twice.
         self.gate = gate if gate is not None else RateGate(
-            cfg.get("per_proxy_rate_sec", cfg.get("rate_limit_sec", 1.0)),
+            _tuned(cfg, "per_proxy_rate_sec",
+                   cfg.get("rate_limit_sec", 1.0)),
             sleep=sleep)
         self._lock = threading.Lock()
         self._levels: dict[str, int] = {}
@@ -205,6 +224,7 @@ class Ladder:
         next_proxy = _UNSET
         error_retried = False
         backoff_used = False
+        forced = None  # an outcome the ladder knows without a response
         limit = 1 + self.max_retries
 
         while len(steps) < limit:
@@ -220,10 +240,19 @@ class Ladder:
                 proxy = next_proxy
                 next_proxy = _UNSET
             elif self.pool is not None:
+                # R27: with a pool configured we never fetch from the origin.
+                # No proxy means either every group is cooling for this host
+                # ("blocked": we never got an answer) or the page already has
+                # a verdict from a real response (keep it: 429, error, ...).
                 if not tried_groups:
-                    proxy = self.pool.acquire(host) or proxy
+                    proxy = self.pool.acquire(host)
                 else:
-                    proxy = self.pool.alternate(host, set(tried_groups)) or proxy
+                    proxy = self.pool.alternate(host, set(tried_groups))
+                if proxy is None:
+                    if verdict is None:
+                        note = f"no proxy available for {host}"
+                        forced = "blocked"
+                    break
 
             group = _group_of(proxy)
             if group is not None:
@@ -287,7 +316,7 @@ class Ladder:
         elapsed = int((time.monotonic() - started) * 1000)
         return PageFetch(status=status, html=html, attempts=len(steps),
                          steps=steps, proxy_group=group, elapsed_ms=elapsed,
-                         note=self.scrub(note))
+                         note=self.scrub(note), outcome=forced)
 
     # -- helpers -----------------------------------------------------------
 

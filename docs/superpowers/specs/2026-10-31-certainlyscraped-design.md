@@ -91,8 +91,23 @@ proxies:
   else their /16 (IPv4) or /48 (IPv6) prefix; hostnames without a label are their own group.
 - `session: rotate` generates a new random session token per request; `sticky` keeps one
   per (host, worker).
-- **Secrets:** passwords only from environment variables named in the config. Every log
-  line, page outcome and MCP response shows the group label, never the URL or password.
+- **Never without a proxy (R27):** when a pool is configured, a page is fetched through a
+  proxy or not at all. If `acquire`/`alternate` return None (every group is cooling for
+  that host), the page stops with outcome `blocked` and the note
+  `no proxy available for <host>`; a verdict already reached (a 429, an error) is kept.
+  The ladder never falls back to the origin IP and never reuses a proxy the pool just
+  parked.
+- **Secrets:** passwords only from environment variables named in the config, or from a
+  dedicated proxies file (`--proxies`, `CERTAINLYSCRAPED_PROXIES`). Every log line, page
+  outcome and MCP response shows the group label, never the URL, host or password --
+  `scrub()` masks the bare host and `host:port` too, because the private-address guard
+  reports `private address: 10.1.2.3` with no scheme (R32a).
+- **No passwords in the main config (R31):** a userinfo password in `proxy:`/`proxies:`
+  inside the YAML the user commits is refused with an error naming the alternative
+  ("move it to a proxies file passed with `--proxies`, or use a gateway template with
+  `password_env`"). A proxies file and the environment are the dedicated channels and may
+  carry one; it is redacted everywhere from then on. The reason is the commit: a config
+  that has to be shared, reviewed and versioned never carries a live password.
 - Thread-safe (one lock); the pool is shared by the parallel fetcher.
 
 ## 6. Parallel fetching
