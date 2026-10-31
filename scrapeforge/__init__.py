@@ -35,9 +35,7 @@ for _info in pkgutil.iter_modules(certainlyscraped.__path__):
 del _info, _module
 
 
-def _deprecated_main(argv=None):
-    """Console entry point for the old `scrapeforge` command."""
-    print("scrapeforge was renamed to certainlyscraped; the old command goes "
-          "away in 0.5.0", file=sys.stderr)
-    from certainlyscraped.cli import main
-    return main(argv)
+# The console entry point lives in certainlyscraped.cli so it does not have to
+# import this package (whose import warns). Kept exported for `python -m` and
+# for callers of the old attribute.
+from certainlyscraped.cli import _deprecated_main  # noqa: E402,F401

@@ -218,6 +218,18 @@ def cmd_run(args):
         sys.exit(code)
 
 
+def _deprecated_main(argv=None):
+    """Console entry point for the old `scrapeforge` command (0.5.0 removal).
+
+    Lives here rather than in the `scrapeforge` package so the entry point does
+    not import the shim, which warns on import: the command prints one notice,
+    not a DeprecationWarning plus a stderr line.
+    """
+    print("scrapeforge was renamed to certainlyscraped; the old command goes "
+          "away in 0.5.0", file=sys.stderr)
+    return main(argv)
+
+
 def cmd_mcp(args):
     """Run the MCP server over stdio: the agent-facing surface."""
     if importlib.util.find_spec("mcp") is None:

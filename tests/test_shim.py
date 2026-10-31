@@ -30,7 +30,17 @@ def test_python_m_scrapeforge_runs():
     )
     assert result.returncode == 0, result.stderr
     assert "renamed to certainlyscraped" in result.stderr
+    assert result.stderr.count("renamed to certainlyscraped") == 1
     assert "RuntimeWarning" not in result.stderr
+    assert "DeprecationWarning" not in result.stderr
+
+
+def test_old_command_entry_point_is_the_new_module():
+    # The console script must not import the shim (which warns): one notice.
+    import scrapeforge
+    from certainlyscraped.cli import _deprecated_main
+
+    assert scrapeforge._deprecated_main is _deprecated_main
 
 
 def test_old_command_prints_notice(capsys):

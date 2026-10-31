@@ -184,5 +184,8 @@ def summary_line(outcomes: list[PageOutcome]) -> str:
     line = f"[done] {len(outcomes)} {pages}: {listed}"
     first = next((o for o in outcomes if o.outcome in INCOMPLETE), None)
     if first is not None:
-        line += f" (HTTP {first.status} on {_path_and_query(first.url)})"
+        where = _path_and_query(first.url)
+        # A request that never got a response has no HTTP status to quote.
+        cause = ("no response" if first.status == 0 else f"HTTP {first.status}")
+        line += f" ({cause} on {where})"
     return line

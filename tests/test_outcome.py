@@ -124,6 +124,13 @@ def test_summary_line():
     )
 
 
+def test_summary_line_says_no_response_instead_of_http_0():
+    outcomes = [page("https://x/list", "error", 0)]
+    assert summary_line(outcomes) == (
+        "[done] 1 page: 1 error (no response on /list)"
+    )
+
+
 def test_summary_line_singular_and_no_incomplete():
     assert summary_line([page("https://x/", "ok", 200, rows=1)]) == "[done] 1 page: 1 ok"
 
