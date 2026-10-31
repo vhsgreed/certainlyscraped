@@ -7,25 +7,30 @@ for callers that only need a page count.
 """
 from __future__ import annotations
 
-import time
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 from .outcome import PageFetch, PageOutcome, classify_fetch, outcome_for
+from .runner import DEFAULT_GATE, RateGate
 
 
 def follow_links(fetch_page, base_url: str, cfg: dict, on_page,
-                 log=None) -> list[PageOutcome]:
+                 log=None, gate=DEFAULT_GATE) -> list[PageOutcome]:
     """Fetch every page, recording one ``PageOutcome`` per page.
 
     fetch_page(url) -> PageFetch; on_page(html, url) -> rows added by the page
     (0 marks an otherwise-good page ``empty``, not ``ok``).
     log: stream for a line when an error status ends pagination early
          (a block or rate limit otherwise looks like the last page).
+    gate: the rate gate; by default one is built from ``rate_limit_sec``.
+          Pass ``None`` when the fetcher paces every attempt itself (the
+          ladder), so a page is never waited for twice.
     Returns the outcomes in fetch order.
     """
     pag = cfg.get("paginate") or {}
     max_pages = min(cfg.get("max_pages", 10), 100)
     rate = cfg.get("rate_limit_sec", 2.0)
+    if gate is DEFAULT_GATE:
+        gate = RateGate(rate)
 
     url = base_url
     seen = {url}
@@ -34,18 +39,22 @@ def follow_links(fetch_page, base_url: str, cfg: dict, on_page,
     from bs4 import BeautifulSoup
 
     while url and pages < max_pages:
+        if gate is not None:
+            gate.wait((urlparse(url).hostname or "", None))
         fetched = fetch_page(url)
         verdict = classify_fetch(url, fetched.status, fetched.html)
         if fetched.status >= 400:
             # Recorded, then stop: the rest of the pagination is unreachable.
-            outcomes.append(outcome_for(url, fetched, verdict))
+            outcomes.append(outcome_for(url, fetched, verdict,
+                                       note=fetched.note or None))
             if log:
                 print(f"[paginate] stopped: HTTP {fetched.status} on {url}",
                       file=log)
             break
         pages += 1
         rows = on_page(fetched.html, url) or 0
-        outcomes.append(outcome_for(url, fetched, verdict, rows=rows))
+        outcomes.append(outcome_for(url, fetched, verdict, rows=rows,
+                                    note=fetched.note or None))
 
         if not pag:
             break
@@ -71,8 +80,6 @@ def follow_links(fetch_page, base_url: str, cfg: dict, on_page,
         if url in seen:  # next link points back at a page already fetched
             break
         seen.add(url)
-        if rate:
-            time.sleep(rate)
     return outcomes
 
 

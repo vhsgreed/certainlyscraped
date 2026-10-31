@@ -20,11 +20,12 @@ from typing import Callable
 
 import yaml
 
+from .escalate import Ladder
 from .extract import extract_page
 from .fetch import fetch as _fetch
 from .outcome import PageFetch, PageOutcome, scrape_status, summary_line
 from .paginate import follow_links
-from .runner import page_source, run_parallel
+from .runner import DEFAULT_GATE, page_source, run_parallel
 
 Fetcher = Callable[[str], "tuple[int, str]"]
 
@@ -81,7 +82,8 @@ def scrape(config: str | dict, *, tier: int | None = None,
            guard=None) -> ScrapeResult:
     """Fetch every page the config paginates over and extract its items.
 
-    tier: override the config's tier (skips the probe).
+    tier: override the config's tier (skips the probe). The ladder starts
+          every host here and climbs from it when a page is walled.
     fetcher: callable url -> (status, html); replaces the tiered fetcher,
              which is how tests and custom transports plug in.
     log: stream for progress lines, or None for silence.
@@ -98,11 +100,15 @@ def scrape(config: str | dict, *, tier: int | None = None,
         cfg = dict(cfg, url=urls[0])
     if tier is None:
         tier = 1 if fetcher else resolve_tier(cfg, log, guard=guard)
+    ladder = None
     if fetcher is None:
-        def fetcher(u):
-            return _fetch(u, tier, timeout=cfg.get("timeout", 30),
-                          proxy=cfg.get("proxy"), cookies=cfg.get("cookies"),
-                          guard=guard)
+        # The built-in path escalates per site: the ladder owns the tier
+        # choice for every page and the pacing gate (so the runner is told
+        # gate=None and never charges a page a second wait).
+        ladder = Ladder(cfg, tier, fetch_fn=_fetch, guard=guard, log=log)
+        fetch_page = ladder.fetch_page
+    else:
+        fetch_page = as_page_fetcher(fetcher, tier)
 
     rows: list[dict] = []
     seen: set[str] = set()
@@ -118,12 +124,13 @@ def scrape(config: str | dict, *, tier: int | None = None,
                 added += 1
         return added
 
-    fetch_page = as_page_fetcher(fetcher, tier)
+    gate = None if ladder is not None else DEFAULT_GATE
     if kind == "links":
-        outcomes = follow_links(fetch_page, cfg["url"], cfg, on_page, log=log)
+        outcomes = follow_links(fetch_page, cfg["url"], cfg, on_page, log=log,
+                                gate=gate)
     else:
         outcomes = run_parallel(fetch_page, urls, cfg, on_page, log=log,
-                                stop_on_trailing=(kind == "range"))
+                                stop_on_trailing=(kind == "range"), gate=gate)
     pages = sum(1 for o in outcomes if o.status < 400)
     if log:
         print(summary_line(outcomes), file=log)

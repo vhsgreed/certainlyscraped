@@ -23,6 +23,11 @@ MAX_WORKERS = 16
 # Consecutive trailing not_found/empty pages that end a range crawl.
 TRAILING_STOP = 2
 
+# Sentinel for the `gate` argument: build a RateGate as before. Passing
+# gate=None means "the fetcher paces itself" (the escalation ladder owns the
+# gate), so a page is never charged two waits.
+DEFAULT_GATE = object()
+
 _SOURCES = ("paginate", "pages", "urls")
 _TRAILING = frozenset({"not_found", "empty"})
 
@@ -126,7 +131,8 @@ def _clamp(value, low: int, high: int) -> int:
 
 
 def run_parallel(fetch_page, urls: list[str], cfg: dict, on_page,
-                 log=None, stop_on_trailing: bool = False) -> list[PageOutcome]:
+                 log=None, stop_on_trailing: bool = False,
+                 gate=DEFAULT_GATE) -> list[PageOutcome]:
     """Fetch ``urls`` concurrently; feed ``on_page`` in URL order.
 
     fetch_page(url) -> PageFetch. Results are consumed on the calling thread in
@@ -136,6 +142,10 @@ def run_parallel(fetch_page, urls: list[str], cfg: dict, on_page,
 
     With ``stop_on_trailing`` (range sources only), two consecutive
     not_found/empty pages end the crawl and the remaining pages are dropped.
+
+    ``gate`` is the rate gate: by default one is built from
+    ``rate_limit_sec``. Pass ``None`` when the fetcher already paces every
+    attempt (the ladder), so no page is waited for twice.
     """
     urls = list(urls)
     outcomes: list[PageOutcome] = []
@@ -143,7 +153,8 @@ def run_parallel(fetch_page, urls: list[str], cfg: dict, on_page,
         return outcomes
 
     workers = _clamp(cfg.get("concurrency", 1), 1, MAX_WORKERS)
-    gate = RateGate(cfg.get("rate_limit_sec", 1.0))
+    if gate is DEFAULT_GATE:
+        gate = RateGate(cfg.get("rate_limit_sec", 1.0))
     executor = ThreadPoolExecutor(max_workers=workers,
                                   thread_name_prefix="cs-parallel")
     pending: dict[int, Future] = {}
@@ -157,7 +168,8 @@ def run_parallel(fetch_page, urls: list[str], cfg: dict, on_page,
             # Take the slot on the calling thread, before submitting: a pool
             # worker that slept here would be joined as non-daemon at exit,
             # so Ctrl-C would hang for the rest of the gate interval.
-            gate.wait((_host(url), None))
+            if gate is not None:
+                gate.wait((_host(url), None))
             pending[next_index] = executor.submit(fetch_page, url)
             next_index += 1
 
@@ -200,7 +212,10 @@ def run_parallel(fetch_page, urls: list[str], cfg: dict, on_page,
 
 def _consume(url: str, fetched: PageFetch, on_page) -> PageOutcome:
     verdict = classify_fetch(url, fetched.status, fetched.html)
+    # The ladder explains why it stopped (max_tier reached, tier 3 missing);
+    # keep that note rather than the generic classification note.
+    note = fetched.note or None
     if fetched.status >= 400 or fetched.status == 0:
-        return outcome_for(url, fetched, verdict)
+        return outcome_for(url, fetched, verdict, note=note)
     rows = on_page(fetched.html, url) or 0
-    return outcome_for(url, fetched, verdict, rows=rows)
+    return outcome_for(url, fetched, verdict, rows=rows, note=note)

@@ -8,6 +8,8 @@ tier 3: cloakbrowser (source-patched Chromium, Amazon-class) or
 """
 from __future__ import annotations
 
+import importlib.util
+
 from . import __version__
 
 # Tier 1 says who it is. A Chrome UA on a client that does not connect like
@@ -21,10 +23,19 @@ MAX_REDIRECTS = 10
 _REDIRECT_CODES = frozenset({301, 302, 303, 307, 308})
 
 
+def tier3_available() -> bool:
+    """True when any tier-3 backend is installed (scrapling, cloakbrowser or
+    playwright). A ladder must not climb to tier 3 it cannot run."""
+    return any(importlib.util.find_spec(name) is not None
+               for name in ("scrapling", "cloakbrowser", "playwright"))
+
+
 def fetch(url: str, tier: int, timeout: int = 30, proxy: str | None = None,
           cookies: dict | None = None, *, guard=None,
-          transport=None) -> tuple[int, str]:
-    """Returns (status_code, html). Raises FetchError on hard failure.
+          transport=None, return_headers: bool = False):
+    """Returns (status_code, html), or (status_code, html, headers) when
+    ``return_headers`` is true (headers lowercased; used for Retry-After).
+    Raises FetchError on hard failure.
 
     file:// URLs read a saved page from disk (any tier), so a config can be
     developed against a page saved once with `certainlyscraped fetch`.
@@ -41,19 +52,28 @@ def fetch(url: str, tier: int, timeout: int = 30, proxy: str | None = None,
     if url.startswith("file://"):
         if guard is not None:
             raise FetchError("file:// not allowed under the guard")
-        return _read_file(url)
-    if guard is not None:
+        status, html = _read_file(url)
+        headers: dict[str, str] = {}
+    elif guard is not None:
         if tier not in (1, 2):
             raise FetchError("tier 3 disabled under the MCP guard")
         if tier == 1:
-            return _fetch_httpx_guarded(url, timeout, proxy, cookies, guard,
-                                        transport)
-        return _fetch_curl_cffi_guarded(url, timeout, proxy, cookies, guard)
-    if tier == 1:
-        return _fetch_httpx(url, timeout, proxy, cookies, transport)
-    if tier == 2:
-        return _fetch_curl_cffi(url, timeout, proxy, cookies)
-    return _fetch_browser(url, timeout, proxy, cookies)
+            status, html, headers = _fetch_httpx_guarded(
+                url, timeout, proxy, cookies, guard, transport)
+        else:
+            status, html, headers = _fetch_curl_cffi_guarded(
+                url, timeout, proxy, cookies, guard)
+    elif tier == 1:
+        status, html, headers = _fetch_httpx(url, timeout, proxy, cookies,
+                                             transport)
+    elif tier == 2:
+        status, html, headers = _fetch_curl_cffi(url, timeout, proxy, cookies)
+    else:
+        status, html = _fetch_browser(url, timeout, proxy, cookies)
+        headers = {}
+    if return_headers:
+        return status, html, headers
+    return status, html
 
 
 class FetchError(RuntimeError):
@@ -98,13 +118,23 @@ def _client_kwargs(timeout, proxy, cookies, transport,
     return kwargs
 
 
-def _fetch_httpx(url, timeout, proxy, cookies, transport=None) -> tuple[int, str]:
+def _lower_headers(headers) -> dict[str, str]:
+    """Response headers with lowercase keys; Retry-After must be findable
+    whatever case the server sent (HTTP header names are case-insensitive)."""
+    try:
+        return {str(k).lower(): str(v) for k, v in headers.items()}
+    except (AttributeError, TypeError):
+        return {}
+
+
+def _fetch_httpx(url, timeout, proxy, cookies, transport=None):
     import httpx
     if transport is not None:
         with httpx.Client(**_client_kwargs(timeout, proxy, cookies, transport,
                                            follow_redirects=True)) as client:
             r = client.get(url)
-        return r.status_code, r.text
+        return (r.status_code, r.text,
+                _lower_headers(getattr(r, "headers", None)))
     kwargs = dict(timeout=timeout, follow_redirects=True,
                   headers={"User-Agent": USER_AGENT})
     if proxy:
@@ -112,7 +142,8 @@ def _fetch_httpx(url, timeout, proxy, cookies, transport=None) -> tuple[int, str
     if cookies:
         kwargs["cookies"] = cookies
     r = httpx.get(url, **kwargs)
-    return r.status_code, r.text
+    return (r.status_code, r.text,
+            _lower_headers(getattr(r, "headers", None)))
 
 
 def _guard_proxy(proxy, guard) -> None:
@@ -168,14 +199,14 @@ def _guarded_get(get, url, guard, urljoin, unpack):
         status, text, headers = unpack(r)
         location = _redirect_location(status, headers)
         if location is None:
-            return status, text
+            return status, text, _lower_headers(headers)
         if redirects >= MAX_REDIRECTS:
             raise FetchError("too many redirects")
         redirects += 1
         current = urljoin(current, location)
 
 
-def _fetch_curl_cffi(url, timeout, proxy, cookies) -> tuple[int, str]:
+def _fetch_curl_cffi(url, timeout, proxy, cookies):
     try:
         from curl_cffi import requests as cr
     except ImportError as e:
@@ -186,7 +217,8 @@ def _fetch_curl_cffi(url, timeout, proxy, cookies) -> tuple[int, str]:
     if cookies:
         kwargs["cookies"] = cookies
     r = cr.get(url, **kwargs)
-    return r.status_code, r.text
+    return (r.status_code, r.text,
+            _lower_headers(getattr(r, "headers", None)))
 
 
 def _cookie_params(url: str, cookies: dict | None) -> list[dict]:
