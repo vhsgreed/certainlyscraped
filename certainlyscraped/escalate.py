@@ -17,6 +17,7 @@ not duplicate:
 """
 from __future__ import annotations
 
+import math
 import threading
 import time
 from datetime import datetime, timezone
@@ -27,12 +28,17 @@ from .outcome import PageFetch, classify_fetch
 from .runner import RateGate
 
 MAX_TIER = 3
+MAX_RETRIES = 3
 DEFAULT_MAX_TIER = 2
 DEFAULT_MAX_RETRIES = 3
 DEFAULT_COOLDOWN_SEC = 300
 
-# ok / not_found / empty end the page: no retry can improve them.
-_TERMINAL = frozenset({"ok", "not_found", "empty"})
+# How long one backoff slice runs before the cancel event is checked again.
+CANCEL_SLICE_SEC = 0.25
+
+# ok / not_found end the page: no retry can improve them. ("empty" is added
+# later by the runner, from the row count -- the ladder never sees it.)
+_TERMINAL = frozenset({"ok", "not_found"})
 
 # A proxy has not been chosen for the next attempt (distinct from "no proxy").
 _UNSET = object()
@@ -42,12 +48,35 @@ def _host(url: str) -> str:
     return urlparse(url).hostname or ""
 
 
-def _clamp(value, low: int, high: int) -> int:
+def _number(value, name: str) -> float:
+    """A finite number, or a ValueError that names the offending key.
+
+    Failing open here is worse than failing loudly: a typo'd ``max_tier``
+    silently disabled escalation, and ``.inf`` reached ``time.sleep``.
+    """
+    if isinstance(value, bool) or value is None:
+        raise ValueError(f"{name} must be a number, got {value!r}")
     try:
-        number = int(value)
+        number = float(value)
     except (TypeError, ValueError):
-        return low
-    return max(low, min(high, number))
+        raise ValueError(f"{name} must be a number, got {value!r}") from None
+    if not math.isfinite(number):
+        raise ValueError(f"{name} must be finite, got {value!r}")
+    return number
+
+
+def _clamp(value, low: int, high: int, name: str = "value") -> int:
+    return max(low, min(high, int(_number(value, name))))
+
+
+def escalate_tier3_usable(ladder) -> bool:
+    """True only when tier 3 can really be fetched: installed and unguarded.
+
+    ``fetch`` refuses tier 3 under the MCP guard (it cannot police a browser
+    hop), so the ladder must treat that as "no tier 3" rather than climbing
+    into a refusal that would surface as a status-0 error.
+    """
+    return ladder.guard is None and tier3_available()
 
 
 def _group_of(proxy) -> str | None:
@@ -89,23 +118,28 @@ class Ladder:
     """Escalating fetcher: one :class:`PageFetch` per page, cheapest tier first."""
 
     def __init__(self, cfg: dict, start_tier: int, pool=None, gate=None,
-                 fetch_fn=fetch, sleep=time.sleep, guard=None, log=None) -> None:
+                 fetch_fn=fetch, sleep=time.sleep, guard=None, log=None,
+                 cancel: threading.Event | None = None) -> None:
         cfg = cfg or {}
         self.cfg = cfg
-        self.start_tier = _clamp(start_tier, 1, MAX_TIER)
+        self.guard = guard
+        # Set by run_parallel when the run is interrupted; a backoff then
+        # returns early instead of parking a pool worker for cooldown_sec.
+        self.cancel = cancel
+        self.start_tier = _clamp(start_tier, 1, MAX_TIER, "start_tier")
         self.max_tier = _clamp(cfg.get("max_tier", DEFAULT_MAX_TIER),
-                               1, MAX_TIER)
+                               1, MAX_TIER, "max_tier")
         self.max_retries = _clamp(cfg.get("max_retries", DEFAULT_MAX_RETRIES),
-                                  0, 99)
-        if self.start_tier == MAX_TIER and not tier3_available():
+                                  0, MAX_RETRIES, "max_retries")
+        if self.start_tier == MAX_TIER and not escalate_tier3_usable(self):
             # A probed/config tier 3 we cannot run starts at 2 instead; the
             # ladder then stops with "tier 3 not available" if 2 is blocked.
             self.start_tier = MAX_TIER - 1
-        self.cooldown_sec = float(cfg.get("cooldown_sec", DEFAULT_COOLDOWN_SEC))
+        self.cooldown_sec = max(0.0, _number(
+            cfg.get("cooldown_sec", DEFAULT_COOLDOWN_SEC), "cooldown_sec"))
         self.pool = pool
         self.fetch_fn = fetch_fn
         self.sleep = sleep
-        self.guard = guard
         self.log = log
         self.timeout = cfg.get("timeout", 30)
         self.cookies = cfg.get("cookies")
@@ -132,6 +166,29 @@ class Ladder:
             if tier > self._levels.get(host, self.start_tier):
                 self._levels[host] = tier
 
+    def _cancelled(self) -> bool:
+        return self.cancel is not None and self.cancel.is_set()
+
+    def _backoff_sleep(self, seconds: float) -> bool:
+        """Wait ``seconds``; True when the run was cancelled while waiting.
+
+        Without a cancel event this is the single ``sleep`` call it always
+        was (so a fake clock records one wait per backoff). With one, the
+        wait runs in slices of at most :data:`CANCEL_SLICE_SEC` so Ctrl-C
+        does not wait out a 300 s cooldown on a pool worker thread.
+        """
+        if self.cancel is None:
+            self.sleep(seconds)
+            return False
+        remaining = max(0.0, float(seconds))
+        while remaining > 0:
+            if self.cancel.is_set():
+                return True
+            slice_sec = min(CANCEL_SLICE_SEC, remaining)
+            self.sleep(slice_sec)
+            remaining -= slice_sec
+        return self.cancel.is_set()
+
     # -- one page ----------------------------------------------------------
 
     def fetch_page(self, url: str) -> PageFetch:
@@ -147,10 +204,15 @@ class Ladder:
         tried_groups: set[str] = set()
         next_proxy = _UNSET
         error_retried = False
+        backoff_used = False
         limit = 1 + self.max_retries
 
         while len(steps) < limit:
-            if tier == MAX_TIER and not tier3_available():
+            # A first attempt already submitted still runs; after that an
+            # interrupted run stops the page rather than fetching again.
+            if steps and self._cancelled():
+                break
+            if tier == MAX_TIER and not escalate_tier3_usable(self):
                 note = "tier 3 not available"
                 break
 
@@ -182,8 +244,15 @@ class Ladder:
                 if alternate is not None:
                     next_proxy = alternate
                     continue
-                self.sleep(self._backoff(headers))
-                # Same tier again; the attempt budget stops a forever loop.
+                # Spec 4.2: ONE backoff per page. Retry the same tier once
+                # after waiting, and take the 429 as final if it comes back
+                # -- a second cooldown buys nothing (and no wait is spent on
+                # an attempt budget that is already used up).
+                if backoff_used or len(steps) >= limit:
+                    break
+                backoff_used = True
+                if self._backoff_sleep(self._backoff(headers)):
+                    break  # Ctrl-C: stop the page, keep the 429 verdict
                 continue
 
             if verdict.outcome == "blocked":
@@ -227,7 +296,7 @@ class Ladder:
         if tier >= self.max_tier:
             return None, f"max_tier {self.max_tier} reached"
         nxt = tier + 1
-        if nxt >= MAX_TIER and not tier3_available():
+        if nxt >= MAX_TIER and not escalate_tier3_usable(self):
             return None, "tier 3 not available"
         if self.log:
             print(f"[ladder] {url}: t{tier} -> t{nxt} ({reason})", file=self.log)

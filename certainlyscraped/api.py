@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Callable
@@ -101,11 +102,16 @@ def scrape(config: str | dict, *, tier: int | None = None,
     if tier is None:
         tier = 1 if fetcher else resolve_tier(cfg, log, guard=guard)
     ladder = None
+    cancel = None
     if fetcher is None:
         # The built-in path escalates per site: the ladder owns the tier
         # choice for every page and the pacing gate (so the runner is told
-        # gate=None and never charges a page a second wait).
-        ladder = Ladder(cfg, tier, fetch_fn=_fetch, guard=guard, log=log)
+        # gate=None and never charges a page a second wait). Both the ladder
+        # and the runner share one cancel event so Ctrl-C reaches a worker
+        # that is parked in a backoff.
+        cancel = threading.Event()
+        ladder = Ladder(cfg, tier, fetch_fn=_fetch, guard=guard, log=log,
+                        cancel=cancel)
         fetch_page = ladder.fetch_page
     else:
         fetch_page = as_page_fetcher(fetcher, tier)
@@ -130,7 +136,8 @@ def scrape(config: str | dict, *, tier: int | None = None,
                                 gate=gate)
     else:
         outcomes = run_parallel(fetch_page, urls, cfg, on_page, log=log,
-                                stop_on_trailing=(kind == "range"), gate=gate)
+                                stop_on_trailing=(kind == "range"), gate=gate,
+                                cancel=cancel)
     pages = sum(1 for o in outcomes if o.status < 400)
     if log:
         print(summary_line(outcomes), file=log)

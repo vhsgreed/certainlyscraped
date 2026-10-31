@@ -132,7 +132,7 @@ def _clamp(value, low: int, high: int) -> int:
 
 def run_parallel(fetch_page, urls: list[str], cfg: dict, on_page,
                  log=None, stop_on_trailing: bool = False,
-                 gate=DEFAULT_GATE) -> list[PageOutcome]:
+                 gate=DEFAULT_GATE, cancel=None) -> list[PageOutcome]:
     """Fetch ``urls`` concurrently; feed ``on_page`` in URL order.
 
     fetch_page(url) -> PageFetch. Results are consumed on the calling thread in
@@ -146,6 +146,11 @@ def run_parallel(fetch_page, urls: list[str], cfg: dict, on_page,
     ``gate`` is the rate gate: by default one is built from
     ``rate_limit_sec``. Pass ``None`` when the fetcher already paces every
     attempt (the ladder), so no page is waited for twice.
+
+    ``cancel`` is an optional ``threading.Event`` handed to the fetcher; it is
+    set before the pool is torn down on KeyboardInterrupt (or any other
+    BaseException), so a worker parked in a long backoff notices and returns
+    instead of being joined at interpreter exit.
     """
     urls = list(urls)
     outcomes: list[PageOutcome] = []
@@ -200,6 +205,9 @@ def run_parallel(fetch_page, urls: list[str], cfg: dict, on_page,
                 break
             fill()
     except BaseException:
+        if cancel is not None:
+            # Tell sleeping workers to give up BEFORE we join/cancel them.
+            cancel.set()
         abort()
         raise
 

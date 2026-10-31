@@ -2,7 +2,12 @@
 
 Run: python3 -m pytest tests/ -q
 """
+import os
+import signal
+import subprocess
 import sys
+import threading
+import time
 
 sys.path.insert(0, ".")
 
@@ -165,10 +170,12 @@ def test_start_tier_three_falls_back_when_not_installed(monkeypatch):
 
 
 def test_attempt_budget_is_max_retries_plus_one():
-    ladder, _, _ = make([(429, "")], cfg={"max_retries": 3})
+    """The budget still bounds the error path: retry, climb, retry, climb."""
+    ladder, _, _ = make([(502, "bad gateway")], cfg={"max_retries": 3})
     page = ladder.fetch_page("https://h.test/1")
     assert page.attempts == 4
-    assert page.steps == ["t1"] * 4
+    assert page.steps == ["t1", "t1", "t2", "t2"]
+    assert page.note == "max_tier 2 reached"
 
 
 def test_configured_single_proxy_is_used_without_a_pool():
@@ -269,10 +276,11 @@ def test_api_scrape_uses_the_ladder_and_passes_no_gate(monkeypatch):
     real = api.run_parallel
 
     def spy(fetch_page, urls, cfg, on_page, log=None,
-            stop_on_trailing=False, gate="missing"):
+            stop_on_trailing=False, gate="missing", cancel="missing"):
         captured["gate"] = gate
         return real(fetch_page, urls, cfg, on_page, log=log,
-                    stop_on_trailing=stop_on_trailing, gate=gate)
+                    stop_on_trailing=stop_on_trailing, gate=gate,
+                    cancel=cancel)
 
     monkeypatch.setattr(api, "run_parallel", spy)
     cfg = {"tier": 1, "rate_limit_sec": 0,
@@ -326,3 +334,246 @@ def test_fetch_return_headers_keeps_two_tuple_default():
 def test_tier3_available_helper():
     import certainlyscraped.fetch as fetch_mod
     assert isinstance(fetch_mod.tier3_available(), bool)
+
+
+# --- fix round 1: one backoff per page (R22) ------------------------------
+
+def test_persistent_rate_limit_gets_exactly_one_backoff():
+    """429 without Retry-After: back off once, retry once, then stop."""
+    ladder, fetch_fn, clock = make([(429, "")], cfg={"max_retries": 3})
+    page = ladder.fetch_page("https://h.test/1")
+    assert clock.sleeps == [300]
+    assert page.steps == ["t1", "t1"]
+    assert page.attempts == 2
+    assert classify_fetch("https://h.test/1", page.status, page.html).outcome \
+        == "rate_limited"
+
+
+def test_one_backoff_per_page_even_with_spare_attempts():
+    """A budget of 4 must not buy 4 cooldowns."""
+    ladder, _, clock = make([(429, "")], cfg={"max_retries": 10})
+    page = ladder.fetch_page("https://h.test/1")
+    assert clock.sleeps == [300]
+    assert page.attempts == 2
+
+
+def test_one_backoff_per_page_across_tiers():
+    """429 at t1, challenge climb to t2, 429 again -> no second sleep."""
+    ladder, _, clock = make([(429, ""), (403, CHALLENGE), (429, "")],
+                            cfg={"max_retries": 3})
+    page = ladder.fetch_page("https://h.test/1")
+    assert page.steps == ["t1", "t1", "t2"]
+    assert clock.sleeps == [300]
+    assert sum(clock.sleeps) <= 300
+    assert classify_fetch("https://h.test/1", page.status, page.html).outcome \
+        == "rate_limited"
+
+
+def test_no_sleep_after_the_last_attempt():
+    """Budget already spent: the 429 ends the page without a pointless wait."""
+    ladder, fetch_fn, clock = make([(429, "")], cfg={"max_retries": 0})
+    page = ladder.fetch_page("https://h.test/1")
+    assert page.steps == ["t1"]
+    assert clock.sleeps == []
+    assert len(fetch_fn.calls) == 1
+
+
+def test_rate_limit_retry_honours_retry_after_once():
+    ladder, _, clock = make([(429, "", {"retry-after": "7"})],
+                            cfg={"max_retries": 3})
+    ladder.fetch_page("https://h.test/1")
+    assert clock.sleeps == [7]
+
+
+# --- fix round 1: guard-aware tier 3 (R23) --------------------------------
+
+def test_tier3_is_unusable_under_a_guard(monkeypatch):
+    monkeypatch.setattr(escalate, "tier3_available", lambda: True)
+    ladder, fetch_fn, _ = make([(403, CHALLENGE)],
+                               cfg={"max_tier": 3, "max_retries": 3},
+                               guard=lambda url: None)
+    page = ladder.fetch_page("https://h.test/1")
+    # Tier 3 is installed but the guard forbids it: never attempted.
+    assert [c["tier"] for c in fetch_fn.calls] == [1, 2]
+    assert page.steps == ["t1", "t2"]
+    assert page.note == "tier 3 not available"
+    assert classify_fetch("https://h.test/1", page.status, page.html).outcome \
+        == "blocked"
+
+
+def test_start_tier_three_falls_back_to_two_under_a_guard(monkeypatch):
+    monkeypatch.setattr(escalate, "tier3_available", lambda: True)
+    ladder, _, _ = make([(200, OK)], start=3, cfg={"max_tier": 3},
+                        guard=lambda url: None)
+    assert ladder.start_tier == 2
+    assert ladder.fetch_page("https://h.test/1").steps == ["t2"]
+
+
+def test_escalate_tier3_usable_needs_both(monkeypatch):
+    ladder, _, _ = make([(200, OK)], cfg={"max_tier": 3})
+    monkeypatch.setattr(escalate, "tier3_available", lambda: True)
+    assert escalate.escalate_tier3_usable(ladder) is True
+    ladder.guard = lambda url: None
+    assert escalate.escalate_tier3_usable(ladder) is False
+    monkeypatch.setattr(escalate, "tier3_available", lambda: False)
+    ladder.guard = None
+    assert escalate.escalate_tier3_usable(ladder) is False
+
+
+# --- fix round 1: interruptible sleeps (R24) ------------------------------
+
+def test_backoff_is_sliced_when_cancellable():
+    cancel = threading.Event()
+    clock = FakeClock()
+    ladder, _, _ = make([(429, ""), (200, OK)], cancel=cancel, clock=clock)
+    page = ladder.fetch_page("https://h.test/1")
+    assert page.steps == ["t1", "t1"]
+    assert sum(clock.sleeps) == 300
+    assert max(clock.sleeps) <= 0.25
+    assert len(clock.sleeps) > 1
+
+
+def test_cancel_during_backoff_stops_the_page():
+    cancel = threading.Event()
+    clock = FakeClock()
+    seen = []
+
+    def sleep(seconds):
+        seen.append(seconds)
+        clock.t += seconds
+        cancel.set()  # Ctrl-C lands mid-backoff
+
+    conf = {"max_retries": 3, "rate_limit_sec": 0, "cooldown_sec": 300}
+    ladder = Ladder(conf, 1, fetch_fn=scripted((429, "")), sleep=sleep,
+                    gate=RateGate(0, clock=clock.clock, sleep=sleep),
+                    cancel=cancel)
+    started = time.monotonic()
+    page = ladder.fetch_page("https://h.test/1")
+    assert time.monotonic() - started < 1.0
+    assert seen and max(seen) <= 0.25
+    assert page.steps == ["t1"]  # no retry after the cancel
+    assert classify_fetch("https://h.test/1", page.status, page.html).outcome \
+        == "rate_limited"
+
+
+def test_run_parallel_sets_cancel_when_interrupted():
+    from certainlyscraped.runner import run_parallel
+
+    cancel = threading.Event()
+
+    def fetch_page(url):
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        run_parallel(fetch_page, ["https://h.test/1"],
+                     {"rate_limit_sec": 0, "concurrency": 1},
+                     lambda html, url: 1, gate=None, cancel=cancel)
+    assert cancel.is_set()
+
+
+def test_api_scrape_shares_one_cancel_event(monkeypatch):
+    captured = {}
+
+    class StubLadder:
+        def __init__(self, cfg, start_tier, **kwargs):
+            captured["cancel"] = kwargs.get("cancel")
+
+        def fetch_page(self, url):
+            return PageFetch(status=200, html=OK)
+
+    def spy(fetch_page, urls, cfg, on_page, log=None,
+            stop_on_trailing=False, gate="missing", cancel="missing"):
+        captured["runner_cancel"] = cancel
+        return []
+
+    monkeypatch.setattr(api, "Ladder", StubLadder)
+    monkeypatch.setattr(api, "run_parallel", spy)
+    cfg = {"tier": 1, "rate_limit_sec": 0,
+           "pages": {"template": "https://h.test/{n}", "from": 1, "to": 2},
+           "items": {"selector": "div.p"}, "fields": {"t": {"selector": "a"}}}
+    api.scrape(cfg, log=None)
+    assert isinstance(captured["cancel"], threading.Event)
+    assert captured["cancel"] is captured["runner_cancel"]
+
+
+# A real subprocess and a real SIGINT: a pool worker parked in a 300 s
+# backoff is joined as a non-daemon thread at exit, so only an end-to-end
+# interrupt proves the ladder's sleep is cancellable.
+CTRL_C_BACKOFF_SCRIPT = """
+import sys
+from certainlyscraped import api
+
+def fake_fetch(url, tier, **kwargs):
+    return 429, "", {}
+
+api._fetch = fake_fetch
+cfg = {"tier": 1, "rate_limit_sec": 0, "cooldown_sec": 300,
+       "max_retries": 3, "concurrency": 4,
+       "pages": {"template": "https://h.test/{n}", "from": 1, "to": 10},
+       "items": {"selector": "div.p"},
+       "fields": {"t": {"selector": "a"}}}
+print("READY", flush=True)
+api.scrape(cfg, log=None)
+print("FINISHED", flush=True)
+"""
+
+
+def test_ctrl_c_exits_promptly_during_a_backoff():
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    proc = subprocess.Popen([sys.executable, "-c", CTRL_C_BACKOFF_SCRIPT],
+                            cwd=root, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True)
+    try:
+        assert proc.stdout.readline().strip() == "READY"
+        time.sleep(0.4)  # workers are now inside a 300 s backoff
+        started = time.monotonic()
+        proc.send_signal(signal.SIGINT)
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            raise AssertionError("process slept through SIGINT for over 10 s")
+        elapsed = time.monotonic() - started
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+    assert proc.returncode != 0, "SIGINT should stop the run, not finish it"
+    assert elapsed < 1.5, f"exit took {elapsed:.2f}s after SIGINT (want <1.5s)"
+
+
+# --- fix round 1: strict numeric config (R25) -----------------------------
+
+@pytest.mark.parametrize("key,value", [
+    ("max_tier", "abc"),
+    ("max_tier", None),
+    ("max_tier", float("inf")),
+    ("max_tier", float("nan")),
+    ("max_retries", "abc"),
+    ("max_retries", None),
+    ("max_retries", True),
+    ("max_retries", float("inf")),
+    ("cooldown_sec", "soon"),
+    ("cooldown_sec", float("inf")),
+])
+def test_non_numeric_config_raises_value_error(key, value):
+    with pytest.raises(ValueError) as exc:
+        make([(200, OK)], cfg={key: value})
+    assert key in str(exc.value)
+
+
+def test_numeric_config_is_clamped_not_trusted():
+    ladder, _, _ = make([(200, OK)], cfg={"max_tier": 9})
+    assert ladder.max_tier == 3
+    assert Ladder({"max_tier": 0}, 1, fetch_fn=scripted((200, OK)),
+                  sleep=FakeClock().sleep, gate=FakeGate()).max_tier == 1
+    assert Ladder({"max_retries": 9}, 1, fetch_fn=scripted((200, OK)),
+                  sleep=FakeClock().sleep,
+                  gate=FakeGate()).max_retries == 3
+    assert Ladder({"max_retries": -1}, 1, fetch_fn=scripted((200, OK)),
+                  sleep=FakeClock().sleep,
+                  gate=FakeGate()).max_retries == 0
+    assert Ladder({"cooldown_sec": -5}, 1, fetch_fn=scripted((200, OK)),
+                  sleep=FakeClock().sleep,
+                  gate=FakeGate()).cooldown_sec == 0.0
