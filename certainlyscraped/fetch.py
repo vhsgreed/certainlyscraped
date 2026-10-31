@@ -9,6 +9,7 @@ tier 3: cloakbrowser (source-patched Chromium, Amazon-class) or
 from __future__ import annotations
 
 import importlib.util
+import re
 
 from . import __version__
 
@@ -21,6 +22,44 @@ USER_AGENT = (f"certainlyscraped/{__version__} "
 
 MAX_REDIRECTS = 10
 _REDIRECT_CODES = frozenset({301, 302, 303, 307, 308})
+
+# scheme://user:password@  -- the credentials half of a proxy URL in a message.
+_CREDENTIALS = re.compile(r"([A-Za-z][A-Za-z0-9+.\-]*://)[^/\s@]+@")
+
+
+def redact(text: str, secrets=()) -> str:
+    """``text`` with every secret, and the credentials of any proxy URL, ``***``.
+
+    Two layers, because a message can carry either: an exact known secret
+    (a gateway password, a session token, a configured proxy URL) and the
+    userinfo of a URL this process never configured (a client library's own
+    error message). ``fetch``/``runner``/``api``/``cli`` all route their
+    user-visible text through here before it reaches a log or an outcome.
+    """
+    if not text:
+        return text
+    if isinstance(secrets, str):
+        secrets = [secrets]
+    out = str(text)
+    # Longest first: the whole proxy URL must win over its password, or the
+    # password is masked and the address (which the URL carried) survives.
+    values = sorted({str(secret) for secret in secrets or () if secret},
+                    key=len, reverse=True)
+    for value in values:
+        out = out.replace(value, "***")
+    return _CREDENTIALS.sub(r"\1***@", out)
+
+
+def proxy_url(proxy):
+    """A proxy is a URL string or a ``proxypool.Proxy``; clients get the URL.
+
+    R26: the guard checks the address, so a Proxy object must never reach
+    ``urlsplit`` (or httpx) -- only ``Proxy.url`` does.
+    """
+    if proxy is None or isinstance(proxy, str):
+        return proxy
+    url = getattr(proxy, "url", proxy)
+    return url if isinstance(url, str) else proxy
 
 
 def tier3_available() -> bool:
@@ -48,7 +87,11 @@ def fetch(url: str, tier: int, timeout: int = 30, proxy: str | None = None,
     disabled; file:// is left to the caller, which reads workdir files
     itself.
     transport: test-only httpx transport (httpx.MockTransport).
+
+    proxy may be a URL string or a ``proxypool.Proxy``; only its ``url`` ever
+    reaches a client or the guard (R26).
     """
+    proxy = proxy_url(proxy)
     if url.startswith("file://"):
         if guard is not None:
             raise FetchError("file:// not allowed under the guard")

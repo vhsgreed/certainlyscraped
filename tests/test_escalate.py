@@ -577,3 +577,122 @@ def test_numeric_config_is_clamped_not_trusted():
     assert Ladder({"cooldown_sec": -5}, 1, fetch_fn=scripted((200, OK)),
                   sleep=FakeClock().sleep,
                   gate=FakeGate()).cooldown_sec == 0.0
+
+
+# --- proxy pool integration (Task 7) --------------------------------------
+
+import json
+
+import certainlyscraped.cli as cli
+from certainlyscraped import fetch as fetch_mod
+from certainlyscraped.proxypool import ProxyPool
+
+PROXY_URL = "http://u:s3cret@10.1.2.3:8000"
+
+
+def pool_for(entries, **kwargs):
+    clock = FakeClock()
+    pool = ProxyPool.from_config({"proxies": entries, **kwargs},
+                                 env={}, clock=clock.clock)
+    return pool, clock
+
+
+def test_pool_switches_group_on_rate_limit():
+    pool, _ = pool_for(["http://a:1 # a", "http://b:1 # b"])
+    ladder, fetch_fn, _ = make([(429, ""), (200, OK)], pool=pool)
+    page = ladder.fetch_page("https://h.test/1")
+    assert page.steps == ["t1@a", "t1@b"]
+    assert page.proxy_group == "b"
+    assert [c["proxy"] for c in fetch_fn.calls] == ["http://a:1", "http://b:1"]
+
+
+def test_pool_tries_other_group_before_climbing_tier():
+    pool, _ = pool_for(["http://a:1 # a", "http://b:1 # b"])
+    ladder, fetch_fn, _ = make(
+        [(403, FORBIDDEN), (403, FORBIDDEN), (200, OK)], pool=pool)
+    page = ladder.fetch_page("https://h.test/1")
+    assert page.steps == ["t1@a", "t1@b", "t2@b"]
+    assert [c["tier"] for c in fetch_fn.calls] == [1, 1, 2]
+    assert page.proxy_group == "b"
+
+
+def test_pool_cooldown_keeps_a_blocked_proxy_off_that_host():
+    pool, clock = pool_for(["http://a:1 # a", "http://b:1 # b"])
+    ladder, _, _ = make([(403, FORBIDDEN)], pool=pool)
+    ladder.fetch_page("https://h.test/1")
+    # Both groups reported blocked for the host: nothing is handed out.
+    assert pool.acquire("h.test") is None
+    # ... but another host still gets one.
+    assert pool.acquire("other.test") is not None
+    clock.t += 300
+    assert pool.acquire("h.test") is not None
+
+
+def test_no_secret_anywhere(tmp_path, monkeypatch):
+    """Review Focus 1: a proxy failure must not leak its address anywhere."""
+    import httpx
+
+    def boom(url, tier, **kwargs):
+        raise httpx.ProxyError(f"{PROXY_URL} refused")
+
+    monkeypatch.setattr(api, "_fetch", boom)
+    cfg = {"tier": 1, "rate_limit_sec": 0, "concurrency": 1,
+           "url": "https://h.test/1", "urls": ["https://h.test/1"],
+           "proxies": [PROXY_URL], "items": {"selector": "li"},
+           "fields": {"t": {"selector": "a"}}}
+    import io
+    log = io.StringIO()
+    result = api.scrape(cfg, log=log)
+    text = log.getvalue()
+    assert "s3cret" not in text and "10.1.2.3" not in text
+    assert result.page_report and result.page_report[0].outcome == "error"
+    dumped = json.dumps([o.to_dict() for o in result.page_report])
+    assert "s3cret" not in dumped and "10.1.2.3" not in dumped
+
+    cfg_path = tmp_path / "cfg.yaml"
+    cfg_path.write_text(
+        "url: https://h.test/1\n"
+        "urls: [https://h.test/1]\n"
+        "tier: 1\n"
+        "rate_limit_sec: 0\n"
+        "concurrency: 1\n"
+        "proxies:\n"
+        f"  - {PROXY_URL}\n"
+        "items: {selector: li}\n"
+        "fields: {t: {selector: a}}\n", encoding="utf-8")
+    report = tmp_path / "report.jsonl"
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["run", str(cfg_path), "--out", str(tmp_path / "o.csv"),
+                  "--report", str(report)])
+    assert exc.value.code != 0
+    body = report.read_text(encoding="utf-8")
+    assert "s3cret" not in body and "10.1.2.3" not in body
+    assert "***" in body
+
+
+def test_fetch_accepts_a_proxy_object(monkeypatch):
+    import httpx
+    seen = {}
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            seen.update(kwargs)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def get(self, url):
+            return httpx.Response(200, text="ok")
+
+    monkeypatch.setattr(httpx, "Client", lambda **kw: FakeClient(**kw))
+    from certainlyscraped.proxypool import Proxy
+    guarded = []
+    status, _ = fetch_mod.fetch("https://h.test/1", 1,
+                                proxy=Proxy("http://p:1", "g"),
+                                guard=lambda url: guarded.append(url))
+    assert status == 200
+    assert seen["proxy"] == "http://p:1"
+    assert guarded == ["http://p:1", "https://h.test/1"]

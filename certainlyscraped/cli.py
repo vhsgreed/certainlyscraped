@@ -10,10 +10,12 @@ from pathlib import Path
 import yaml
 
 from . import assist, batchprobe, pageprobe
-from .api import scrape
+from .api import load_config, scrape
 from .classify import probe
+from .fetch import redact
 from .outcome import INCOMPLETE, PageOutcome
 from .output import write
+from .proxypool import ProxyPool, read_proxies_file
 from .since import diff_rows
 from .verify import (EXIT_EMPTY, EXIT_ERROR, EXIT_INCOMPLETE, EXIT_OK,
                      print_report, read_records, verify_file, verify_records)
@@ -70,14 +72,49 @@ def cmd_probe(args):
         sys.exit(EXIT_BLOCKED)
 
 
-def cmd_run(args):
+def _run_config(args):
+    """The config `run` should use: the path, unless a proxy flag overrides it."""
+    if not getattr(args, "proxies", None) \
+            and not getattr(args, "no_proxy", False):
+        return args.config  # scrape() loads it; unchanged for every other run
+    cfg = load_config(args.config)
+    if getattr(args, "proxies", None):
+        # The file is the whole proxy set: it replaces the config's.
+        cfg = {key: value for key, value in cfg.items() if key != "proxy"}
+        cfg["proxies"] = read_proxies_file(args.proxies)
+    else:
+        cfg = {key: value for key, value in cfg.items()
+               if key not in ("proxy", "proxies")}
+    return cfg
+
+
+def _redact_exc(exc: BaseException, cfg) -> str:
+    """`Type: message` with any proxy credential or address removed."""
+    detail = f"{type(exc).__name__}: {exc}"
+    if isinstance(cfg, str):
+        try:
+            cfg = load_config(cfg)
+        except Exception:  # noqa: BLE001 - the original error is the news
+            cfg = None
     try:
-        result = scrape(args.config, log=sys.stderr)
+        pool = ProxyPool.from_config(cfg) if isinstance(cfg, dict) else None
+    except Exception:  # noqa: BLE001 - a bad proxies config must not hide it
+        pool = None
+    return pool.scrub(detail) if pool is not None else redact(detail)
+
+
+def cmd_run(args):
+    cfg = None
+    try:
+        cfg = _run_config(args)
+        result = scrape(cfg, log=sys.stderr)
     except (OSError, ValueError, KeyError, yaml.YAMLError) as e:
-        print(f"[run] config error: {type(e).__name__}: {e}", file=sys.stderr)
+        # A YAML parse error quotes the offending line, which may hold a
+        # proxy URL: same redaction as a fetch failure.
+        print(f"[run] config error: {_redact_exc(e, cfg)}", file=sys.stderr)
         sys.exit(EXIT_ERROR)
     except Exception as e:  # noqa: BLE001 - network/TLS errors from any tier
-        print(f"[run] fetch error: {type(e).__name__}: {e}", file=sys.stderr)
+        print(f"[run] fetch error: {_redact_exc(e, cfg)}", file=sys.stderr)
         sys.exit(EXIT_ERROR)
     cfg, rows = result.config, result.rows
 
@@ -219,6 +256,14 @@ def main(argv=None):
     p_run.add_argument("--accept-partial", action="store_true",
                        help="exit 0 when some pages were blocked, "
                             "rate-limited or errored (default: exit 4)")
+    p_proxies = p_run.add_mutually_exclusive_group()
+    p_proxies.add_argument("--proxies", metavar="PATH",
+                           help="proxy list file (YAML, or one URL per line "
+                                "with optional '# group' labels); replaces "
+                                "the config's proxy/proxies")
+    p_proxies.add_argument("--no-proxy", action="store_true",
+                           help="ignore every proxy in the config and "
+                                "fetch directly")
     p_run.set_defaults(func=cmd_run)
 
     p_verify = sub.add_parser(

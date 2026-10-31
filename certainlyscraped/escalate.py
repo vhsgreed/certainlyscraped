@@ -23,7 +23,7 @@ import time
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
-from .fetch import FetchError, fetch, tier3_available
+from .fetch import FetchError, fetch, redact, tier3_available
 from .outcome import PageFetch, classify_fetch
 from .runner import RateGate
 
@@ -287,7 +287,7 @@ class Ladder:
         elapsed = int((time.monotonic() - started) * 1000)
         return PageFetch(status=status, html=html, attempts=len(steps),
                          steps=steps, proxy_group=group, elapsed_ms=elapsed,
-                         note=note)
+                         note=self.scrub(note))
 
     # -- helpers -----------------------------------------------------------
 
@@ -327,3 +327,20 @@ class Ladder:
     def _report(self, proxy, host: str, outcome: str) -> None:
         if self.pool is not None and proxy is not None:
             self.pool.report(proxy, host, outcome)
+
+    def scrub(self, text: str) -> str:
+        """Page notes go on to logs and datasets: no proxy credential there.
+
+        The pool knows its secrets (= passwords and session tokens) and, for
+        a list pool, its own addresses; a bare string proxy has neither, so
+        the generic credential mask in :func:`fetch.redact` still applies.
+        """
+        if not text:
+            return text
+        scrub = getattr(self.pool, "scrub", None) if self.pool is not None \
+            else None
+        if scrub is not None:
+            return scrub(text)
+        secrets = getattr(self.pool, "secrets", None) if self.pool is not None \
+            else None
+        return redact(text, secrets() if secrets is not None else ())

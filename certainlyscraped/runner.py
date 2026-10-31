@@ -14,6 +14,7 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from urllib.parse import urlparse
 
+from .fetch import redact as _redact
 from .outcome import (PageFetch, PageOutcome, Verdict, classify_fetch,
                       outcome_for)
 
@@ -151,6 +152,10 @@ def run_parallel(fetch_page, urls: list[str], cfg: dict, on_page,
     set before the pool is torn down on KeyboardInterrupt (or any other
     BaseException), so a worker parked in a long backoff notices and returns
     instead of being joined at interpreter exit.
+
+    A raised exception's message is scrubbed (:func:`fetch.redact`) before it
+    reaches the log line or the page note: a proxy client quotes its own proxy
+    URL, credentials included, in ``ProxyError``.
     """
     urls = list(urls)
     outcomes: list[PageOutcome] = []
@@ -192,7 +197,7 @@ def run_parallel(fetch_page, urls: list[str], cfg: dict, on_page,
             try:
                 fetched = future.result()
             except Exception as exc:  # one bad page must not end the run
-                detail = f"{type(exc).__name__}: {exc}"
+                detail = _redact(f"{type(exc).__name__}: {exc}")
                 if log:
                     print(f"[parallel] {url}: {detail}", file=log)
                 outcome = outcome_for(url, None, Verdict("error", detail))

@@ -1,0 +1,6 @@
+# Proxies for the tests: one URL per line, optional "# group" label.
+http://u:p@10.1.2.3:8000 # dc-a
+http://10.1.9.9:8000
+http://10.2.0.1:8000
+http://[2001:db8:1::5]:8000
+http://proxy.example:3128

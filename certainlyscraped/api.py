@@ -24,8 +24,10 @@ import yaml
 from .escalate import Ladder
 from .extract import extract_page
 from .fetch import fetch as _fetch
+from .fetch import redact as _redact
 from .outcome import PageFetch, PageOutcome, scrape_status, summary_line
 from .paginate import follow_links
+from .proxypool import ProxyPool
 from .runner import DEFAULT_GATE, page_source, run_parallel
 
 Fetcher = Callable[[str], "tuple[int, str]"]
@@ -78,6 +80,31 @@ def as_page_fetcher(fetcher: Callable[[str], tuple[int, str]],
     return fetch_page
 
 
+class _ScrubbingLog:
+    """A log stream that redacts every write.
+
+    The runner and the ladder print to whatever stream they are handed, so a
+    wrapper here is the one place that covers every line they emit (including
+    a library's own exception text) without each of them learning about
+    proxies.
+    """
+
+    def __init__(self, stream, scrub) -> None:
+        self._stream = stream
+        self._scrub = scrub
+
+    def write(self, text):
+        return self._stream.write(self._scrub(text))
+
+    def flush(self):
+        flush = getattr(self._stream, "flush", None)
+        if flush is not None:
+            flush()
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
 def scrape(config: str | dict, *, tier: int | None = None,
            fetcher: Fetcher | None = None, log=sys.stderr,
            guard=None) -> ScrapeResult:
@@ -94,6 +121,29 @@ def scrape(config: str | dict, *, tier: int | None = None,
            network policy.
     """
     cfg = load_config(config)
+    # A proxy config (proxy:/proxies:) becomes a pool for this run only; a
+    # stateful pool must never outlive the scrape that built it.
+    pool = ProxyPool.from_config(cfg) if fetcher is None else None
+
+    # A pool knows its secrets and its own addresses; a pool that does not
+    # (a test double) still gets the generic credential mask.
+    scrub = getattr(pool, "scrub", None)
+    pool_secrets = getattr(pool, "secrets", None)
+
+    def clean(text: str) -> str:
+        """Progress text with proxy credentials removed."""
+        if not text:
+            return text
+        if scrub is not None:
+            return scrub(text)
+        if pool_secrets is not None:
+            return _redact(text, pool_secrets())
+        return _redact(text)
+
+    if pool is not None and log is not None:
+        # Every line the ladder and the runner emit, scrubbed at the sink.
+        log = _ScrubbingLog(log, clean)
+
     kind, urls = page_source(cfg, log=log)
     if not cfg.get("url"):
         # pages/urls configs carry no base url; the first page is the base
@@ -110,8 +160,8 @@ def scrape(config: str | dict, *, tier: int | None = None,
         # and the runner share one cancel event so Ctrl-C reaches a worker
         # that is parked in a backoff.
         cancel = threading.Event()
-        ladder = Ladder(cfg, tier, fetch_fn=_fetch, guard=guard, log=log,
-                        cancel=cancel)
+        ladder = Ladder(cfg, tier, pool=pool, fetch_fn=_fetch, guard=guard,
+                        log=log, cancel=cancel)
         fetch_page = ladder.fetch_page
     else:
         fetch_page = as_page_fetcher(fetcher, tier)
@@ -138,8 +188,13 @@ def scrape(config: str | dict, *, tier: int | None = None,
         outcomes = run_parallel(fetch_page, urls, cfg, on_page, log=log,
                                 stop_on_trailing=(kind == "range"), gate=gate,
                                 cancel=cancel)
+    for outcome in outcomes:
+        # An outcome's note is what a dataset or an agent reads: same rule
+        # as the log line it came from.
+        if outcome.note:
+            outcome.note = clean(outcome.note)
     pages = sum(1 for o in outcomes if o.status < 400)
     if log:
-        print(summary_line(outcomes), file=log)
+        print(clean(summary_line(outcomes)), file=log)
         print(f"[rows] {len(rows)} unique items", file=log)
     return ScrapeResult(rows, pages, tier, cfg, outcomes)
