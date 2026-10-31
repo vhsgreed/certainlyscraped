@@ -3,14 +3,14 @@
 A hybrid scraper with escalating effort.
 
 It starts with the cheapest fetch that works, escalates only when a page is
-blocked, and reports exactly what it got and why it stopped. It reads the page,
-writes a config for you, checks that every field filled, and turns a listing
-into rows instead of a promise.
+blocked or still failing, and reports exactly what it got and why it stopped.
+It reads the page, writes a config for you, checks that every field filled, and
+turns a listing into rows instead of a promise.
 
 [![tests](https://github.com/vhsgreed/certainlyscraped/actions/workflows/tests.yml/badge.svg)](https://github.com/vhsgreed/certainlyscraped/actions/workflows/tests.yml)
 [![live check](https://github.com/vhsgreed/certainlyscraped/actions/workflows/live.yml/badge.svg)](https://github.com/vhsgreed/certainlyscraped/actions/workflows/live.yml)
 
-![certainlyscraped demo: init, try, run](docs/demo.gif)
+![certainlyscraped demo recorded before the rename: init, try, run](docs/demo.gif)
 
 ## Quickstart: 20 seconds
 
@@ -25,6 +25,27 @@ cscrape run books.yaml
 fields and the next-page link, and prints how many items each field filled.
 `run` fetches the pages, writes `out.csv`, and fails loudly if it gets fewer
 rows than `--min-rows` (default 1) instead of reporting success.
+
+For an agent, the same install already includes the MCP server:
+
+```bash
+pip install "certainlyscraped[mcp]"
+certainlyscraped mcp
+```
+
+```json
+{
+  "mcpServers": {
+    "certainlyscraped": {
+      "command": "certainlyscraped",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+That gives the agent `probe`, `init`, `try_selector` and `scrape`; the full
+contract is under [MCP server (for agents)](#mcp-server-for-agents).
 
 Real output from the daily live check:
 
@@ -54,6 +75,7 @@ items:
 fields:
   title:        { selector: "h3 a", attr: title }
   url:          { selector: "h3 a", attr: href, absolute: true }
+  image:        { selector: "img.thumbnail", attr: src, absolute: true }
   price:        { selector: "p.price_color", attr: text, type: float }
   availability: { selector: "p.instock.availability", attr: text }
 output: csv
@@ -144,10 +166,15 @@ Four tools, each a thin call into the same API:
 | `try_selector(url, selector, within?)` | match count, sample values, hints |
 | `scrape(config, min_rows?, max_rows?)` | `status`, rows (up to `max_rows`, default 50), the true row count, a dataset path, and per-page outcomes |
 
-`config` is inline YAML or JSON text, never a path. `status` is one of
-`complete`, `incomplete`, `too_few_rows`, `blocked`, `error`, with the same
-meaning as exit codes 0, 4, 2, 3 and 1. A bad request is still a status dict:
-a tool never raises into the JSON-RPC channel.
+`config` is inline YAML or JSON text, never a path. `status` says what the run
+got: `complete` (at least `min_rows` rows and no incomplete page), `incomplete`
+(enough rows, but a page ended blocked, rate-limited or errored),
+`too_few_rows` (fewer than `min_rows` rows), `blocked` (zero rows and every
+page was walled or rate-limited) and `error` (zero rows and every page
+errored). These are not the CLI's exit codes: a blocked-only `run` exits 2,
+exit 3 is only `probe --fail-blocked`, and exit 1 is a config, I/O or fetch
+exception. A bad request is still a status dict: a tool never raises into the
+JSON-RPC channel.
 
 Private addresses are refused by default: loopback, RFC 1918, link-local
 (including `169.254.169.254`) and unique-local IPv6, checked after DNS
@@ -198,8 +225,10 @@ new token per request, `sticky` keeps one per host and worker.
 Passwords never belong in the main config. Put them in a dedicated proxies
 file passed with `--proxies`, or in the environment through `password_env`.
 A password inside an inline `proxy:`/`proxies:` URL in the committed YAML is
-refused with a message naming both alternatives. Every log line, page outcome
-and MCP response shows the group label, never the proxy URL or password.
+refused with a message naming both alternatives. Page outcomes and MCP
+responses carry the group label, never the proxy URL or password; a log line
+for a failing proxy shows the redacted proxy URL, credentials masked, because
+that address is the diagnosis.
 
 Precedence for `run`: `--no-proxy` > `--proxies FILE` >
 `CERTAINLYSCRAPED_PROXIES` > the config. `--no-proxy` ignores every configured
@@ -262,9 +291,10 @@ check rather than a friendly empty CSV.
 
 ## The old name
 
-`scrapeforge` still works as a command and as an import until 0.5.0, and prints
-a deprecation notice on stderr. New code should use `certainlyscraped` or
-`cscrape`; the old name is removed in 0.5.0.
+The `scrapeforge` command still works until 0.5.0 and prints a deprecation
+notice on stderr; `import scrapeforge` also works and raises a
+`DeprecationWarning`, which Python hides by default. New code should use
+`certainlyscraped` or `cscrape`; the old name is removed in 0.5.0.
 
 ## Development
 

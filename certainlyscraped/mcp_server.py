@@ -27,6 +27,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import yaml
 from mcp.server.mcpserver import MCPServer
@@ -174,13 +175,20 @@ def _bounded_int(name: str, value, default: int, low: int, high: int,
 
     Same contract as :func:`_bounded_float`: this runs before the first
     fetch, so a note is enough and the library cannot choke on the value.
+    A fractional value is truncated, and the note says so: `3.7` silently
+    becoming 3 looked like the request had been honoured.
     """
+    truncated = (value if isinstance(value, float)
+                 and math.isfinite(value) and not value.is_integer()
+                 else None)
     try:
         n = int(value)
     except (TypeError, ValueError, OverflowError):
         notes.append(f"{name} is not a whole number ({value!r}); "
                      f"using the default {default}")
         return default
+    if truncated is not None:
+        notes.append(f"{name} {truncated!r} truncated to {n}")
     if n < low:
         notes.append(f"{name} clamped to {low}")
         return low
@@ -205,6 +213,10 @@ def _check_pages(value, notes: list[str]) -> dict:
     if not template.lower().startswith(("http://", "https://")):
         raise _ConfigError("pages.template must be an absolute http:// or "
                            "https:// URL containing {n}")
+    if not urlsplit(template).hostname:
+        raise _ConfigError(
+            f"pages.template must name a host, not just a scheme: "
+            f"{template!r}")
     bounds = {}
     for key in ("from", "to"):
         raw = value.get(key, 1)
@@ -245,6 +257,9 @@ def _check_urls(value, notes: list[str]) -> list[str]:
             raise _ConfigError(
                 f"urls[{i}] is not an absolute http:// or https:// URL: "
                 f"{url!r}")
+        if not urlsplit(url).hostname:
+            raise _ConfigError(
+                f"urls[{i}] must name a host, not just a scheme: {url!r}")
         out.append(url)
     if len(out) > MAX_URLS:
         notes.append(f"urls capped at {MAX_URLS} of {len(out)}")

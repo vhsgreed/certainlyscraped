@@ -36,6 +36,10 @@ def page(url: str, outcome: str, status: int, **kw) -> PageOutcome:
         (410, "", "not_found", False),
         (429, "slow down", "rate_limited", False),
         (419, "Sorry", "rate_limited", False),
+        # R36: a 419 carrying challenge evidence is a challenge, not pacing;
+        # only a 419 without markers stays rate_limited (spec s4.2).
+        (419, "<html><title>Just a moment...</title><body>"
+              "cf-chl challenge</body></html>", "blocked", True),
         (403, "<title>Access Denied</title>", "blocked", True),
         (403, "nope", "blocked", False),
         (

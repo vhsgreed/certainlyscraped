@@ -6,6 +6,12 @@ first release under the name `certainlyscraped`; earlier releases shipped as
 
 ## [0.4.0] - 2026-10-31
 
+### Release notes
+
+- Rename the repository to `vhsgreed/certainlyscraped` before pushing the
+  `0.4.0` tag: the README, badge and schema `$id` URLs already use the new
+  name and 404 until the rename lands.
+
 ### Breaking
 
 - The package, import name and primary command are now `certainlyscraped`.
@@ -43,7 +49,9 @@ first release under the name `certainlyscraped`; earlier releases shipped as
   walled for one host cools down for that host only. `--proxies`,
   `--no-proxy` and `CERTAINLYSCRAPED_PROXIES` set precedence.
 - **Redaction everywhere.** Proxy URLs, hosts and passwords never appear in a
-  log line, a page outcome or an MCP response; only the group label is shown.
+  page outcome or an MCP response; only the group label is shown. A log line
+  for a failing proxy carries the redacted proxy URL (credentials masked),
+  because that address is the diagnosis.
 
 ### Changed
 
@@ -55,5 +63,6 @@ first release under the name `certainlyscraped`; earlier releases shipped as
 
 ### Deprecated
 
-- The `scrapeforge` command and `import scrapeforge` still work in 0.4.x and
-  print a rename notice on stderr. They are removed in 0.5.0.
+- The `scrapeforge` command still works in 0.4.x and prints a rename notice on
+  stderr; `import scrapeforge` also works and raises a `DeprecationWarning`
+  (hidden by default). Both are removed in 0.5.0.

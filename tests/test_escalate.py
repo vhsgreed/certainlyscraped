@@ -111,6 +111,24 @@ def test_challenge_escalates_tier():
         == "ok"
 
 
+def test_419_with_challenge_markers_climbs_instead_of_backing_off():
+    """R36: a 419 with challenge markers is a challenge, so it climbs tier."""
+    ladder, fetch_fn, clock = make([(419, CHALLENGE), (200, OK)])
+    page = ladder.fetch_page("https://h.test/1")
+    assert page.steps == ["t1", "t2"]
+    assert [c["tier"] for c in fetch_fn.calls] == [1, 2]
+    assert clock.sleeps == []  # a challenge is not a rate limit: no backoff
+    assert classify_fetch("https://h.test/1", page.status, page.html).outcome \
+        == "ok"
+
+
+def test_419_without_markers_still_backs_off():
+    ladder, fetch_fn, clock = make([(419, "Sorry"), (200, OK)])
+    page = ladder.fetch_page("https://h.test/1")
+    assert page.steps == ["t1", "t1"]
+    assert clock.sleeps == [300]
+
+
 def test_plain_403_without_pool_escalates():
     ladder, fetch_fn, _ = make([(403, FORBIDDEN), (200, OK)])
     page = ladder.fetch_page("https://h.test/1")

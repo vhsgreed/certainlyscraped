@@ -94,7 +94,11 @@ def classify_fetch(url: str, status: int, html: str) -> Verdict:
         return Verdict("error", "no response")
     if status in (404, 410):
         return Verdict("not_found", f"HTTP {status}")
-    if status in (429, 419):
+    # R36 / spec s4.2: a 429 is always pacing, and a 419 is pacing only when
+    # it carries no challenge evidence. A 419 with markers falls through to
+    # the challenge branch below, so the ladder climbs instead of rotating a
+    # proxy or backing off.
+    if status == 429 or (status == 419 and not challenge):
         return Verdict("rate_limited", f"HTTP {status}", challenge)
     if small and challenge:
         return Verdict("blocked", probe.note or f"HTTP {status} challenge", True)

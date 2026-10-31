@@ -621,6 +621,10 @@ def test_pages_range_is_capped_with_a_note(tmp_path):
     "{template: 'https://example.com/p={n}', from: 'x', to: 2}",
     "{template: 'https://example.com/p={n}', from: 5, to: 2}",
     "{template: 'example.com/p={n}', from: 1, to: 2}",
+    # A scheme is not enough: without a host the guard dies after the
+    # config was accepted.
+    "{template: 'http://', from: 1, to: 2}",
+    "{template: 'http:///p={n}', from: 1, to: 2}",
 ])
 def test_malformed_pages_is_a_status_dict(tmp_path, pages):
     def boom(cfg, **kw):  # pragma: no cover
@@ -655,6 +659,8 @@ def test_urls_are_capped_with_a_note(tmp_path):
     ("ftp://example.com/x", "urls[1]"),
     ("", "urls[1]"),
     ("123", "urls[1]"),
+    ("http://", "urls[1]"),
+    ("http:///no-host", "urls[1]"),
 ])
 def test_urls_relative_or_non_string_entry_is_refused(tmp_path, entry, needle):
     def boom(cfg, **kw):  # pragma: no cover
@@ -717,6 +723,13 @@ def test_concurrency_is_validated_and_clamped(tmp_path):
     assert res["status"] == "complete"
     assert cfg["concurrency"] == 1
     assert any("concurrency" in n for n in res["notes"])
+
+    # A float used to be truncated silently; the note must name the value.
+    res, _, cfg, _ = _scrape_with(
+        tmp_path, "url: https://example.com/x\nitems: { selector: 'li' }\n"
+                  "concurrency: 3.7\n")
+    assert cfg["concurrency"] == 3
+    assert any("3.7" in n and "truncat" in n for n in res["notes"])
 
 
 def test_max_tier_is_capped_at_two_with_a_note(tmp_path):

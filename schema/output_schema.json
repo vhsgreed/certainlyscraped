@@ -14,11 +14,11 @@
     "4": "incomplete: at least min-rows records, but one or more pages ended blocked, rate_limited or error after all retries"
   },
   "mcp_statuses": {
-    "complete": "exit code 0",
-    "incomplete": "exit code 4",
-    "too_few_rows": "exit code 2",
-    "blocked": "exit code 3 (probe --fail-blocked)",
-    "error": "exit code 1"
+    "complete": "at least min_rows rows and no incomplete page",
+    "incomplete": "at least min_rows rows, but one or more pages ended blocked, rate_limited or error",
+    "too_few_rows": "fewer than min_rows rows",
+    "blocked": "zero rows and every page was blocked or rate_limited",
+    "error": "zero rows and every page errored"
   },
   "page_outcomes": {
     "ok": "the page was fetched and classified as real content; rows may be any count",
@@ -59,7 +59,7 @@
   "stderr": [
     "[probe] <url> -> tier <t> (<note>)   (tier: auto only)",
     "[ladder] <url>: t<tier> -> t<tier+1> (<challenge|blocked|error>)",
-    "[pages] <from>..<to> capped at 100 pages (<from>..<capped>)",
+    "[pages] range <from>..<to> capped at 100 pages (<from>..<capped>)",
     "[done] <pages> pages: <n> ok, <n> empty, <n> not_found, <n> blocked, <n> rate_limited, <n> error (HTTP <status> on <path>)",
     "[rows] <n> unique items",
     "[since] <n> new, <n> changed, <n> unchanged vs <PREV>",
@@ -115,8 +115,8 @@
         },
         "attempts": {
           "type": "integer",
-          "minimum": 1,
-          "description": "fetch attempts spent on this page (1 + retries/climbs used)"
+          "minimum": 0,
+          "description": "fetch attempts spent on this page (1 + retries/climbs used); 0 when no proxy was available for the host, so no fetch ran"
         },
         "steps": {
           "type": "array",
@@ -183,7 +183,7 @@
             "string",
             "null"
           ],
-          "description": "full JSONL dataset under <workdir>/.certainlyscraped/, null on an error"
+          "description": "full JSONL dataset under <workdir>/.certainlyscraped/; null when the request was refused before a run (bad config, guard refusal, exception), not when individual pages errored: those still produce a dataset"
         },
         "pages": {
           "type": "array",
@@ -200,7 +200,7 @@
         },
         "private_refused": {
           "type": "boolean",
-          "description": "present and true when the private-address guard refused the target"
+          "description": "present and true only when the guard refused the target during the initial tier probe (config tier: auto); an explicit tier still refuses the fetch but does not set this field"
         }
       }
     }

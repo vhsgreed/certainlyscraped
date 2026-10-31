@@ -7,7 +7,7 @@ A certainlyscraped config needs two kinds of selector: one that matches **each i
 ```bash
 certainlyscraped init https://books.toscrape.com/          # guess a config, preview it
 certainlyscraped try https://books.toscrape.com/ "p.price_color" --in "article.product_pod"
-certainlyscraped run books-toscrape.yaml --out books.csv
+certainlyscraped run books.yaml --out books.csv
 ```
 
 1. **`init`** finds the block repeated most on the page, writes a commented config, and prints a coverage report:

@@ -40,6 +40,7 @@ jobs:
           set -o pipefail
           certainlyscraped run "${{ matrix.config }}" --out /tmp/out \
             --min-rows ${{ matrix.min_rows }} --sample 2 2>&1 | tee /tmp/log
+          test $? -eq 0
       - name: summary
         if: always()
         run: |
@@ -74,8 +75,10 @@ jobs:
           set -o pipefail
           cd "$RUNNER_TEMP"
           certainlyscraped init "${{ matrix.url }}" --name site 2>&1 | tee init.log
+          test $? -eq 0
           certainlyscraped run site.yaml --out out.csv --min-rows ${{ matrix.min_rows }} \
             --sample 2 2>&1 | tee run.log
+          test $? -eq 0
       - name: summary
         if: always()
         run: |
