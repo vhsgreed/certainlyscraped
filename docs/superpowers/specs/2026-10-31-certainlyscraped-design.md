@@ -1,6 +1,6 @@
 # certainlyscraped 0.4.0: design
 
-Status: draft for review (2026-10-31). Supersedes nothing; evolves scrapeforge 0.3.0 in place.
+Status: approved by Karl 2026-10-31. Evolves scrapeforge 0.3.0 in place.
 
 ## 1. Goal and viability
 
@@ -228,10 +228,16 @@ Each step is shippable on its own; stars are checked against the target after st
 
 ## 13. Parked (not in this spec or its plan)
 
-Launch posts, demo GIF re-record, awesome-list submissions, named provider presets.
+- Launch posts, demo GIF re-record, awesome-list submissions, named provider presets.
+- **Tier 4 (experimental, own spec after 0.4.0 ships):** a headful browser driven in the
+  user's own logged-in session, for sites behind a login (Facebook, Reddit, Instagram).
+  Constraints carried into that spec: the user logs in by hand in a dedicated browser
+  profile and the tool never stores or types credentials; opt-in per run; low fixed rate;
+  only what that account can already see; README states the account-ban and terms-of-
+  service risk plainly. Section 2's "no logins" holds for tiers 1-3 and the MCP server.
 
-## 14. Decisions taken without explicit sign-off (flag to change)
+## 14. Decisions confirmed
 
-- MCP server refuses private addresses by default (section 8).
-- `cscrape` as the alias.
-- Old `scrapeforge` names removed in 0.5.0.
+- MCP server refuses private addresses by default (section 8). Approved with the spec.
+- `cscrape` as the alias. Approved by Karl 2026-10-31.
+- Old `scrapeforge` names removed in 0.5.0. Approved with the spec.
