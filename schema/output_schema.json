@@ -1,15 +1,38 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "scrapeforge run contract",
-  "description": "Output contract for `scrapeforge run`. A run is only a success when it extracts at least min_rows records (counted before any --since filtering). Exit codes are part of the contract.",
-  "version": "0.3.0",
-  "updated": "2026-09-23",
-  "command": "scrapeforge run <config.yaml> [--out <dataset>|-] [--min-rows N] [--sample N] [--since PREV] [--key FIELD]... [--snapshot PATH]",
+  "$id": "https://github.com/vhsgreed/certainlyscraped/schema/output_schema.json",
+  "title": "certainlyscraped run contract",
+  "description": "Output contract for `certainlyscraped run` (also `cscrape run`). A run is only a success when it extracts at least min_rows records (counted before any --since filtering) and no page ended incomplete. Exit codes are part of the contract. The run report is JSONL, one PageOutcome per line; the MCP `scrape` tool returns the same records in its `pages` array plus a status word.",
+  "version": "0.4.0",
+  "updated": "2026-10-31",
+  "command": "certainlyscraped run <config.yaml> [--out <dataset>|-] [--min-rows N] [--sample N] [--since PREV] [--key FIELD]... [--snapshot PATH] [--report PATH] [--accept-partial] [--proxies PATH | --no-proxy]",
   "exit_codes": {
-    "0": "at least min-rows records scraped",
+    "0": "complete: at least min-rows records and no incomplete page (--accept-partial maps 4 to 0)",
     "1": "config, I/O or fetch error",
-    "2": "fewer than min-rows records scraped (an empty result fails loudly)"
+    "2": "fewer than min-rows records scraped (an empty result fails loudly); 2 wins over 4",
+    "3": "probe --fail-blocked: the target is walled",
+    "4": "incomplete: at least min-rows records, but one or more pages ended blocked, rate_limited or error after all retries"
   },
+  "mcp_statuses": {
+    "complete": "exit code 0",
+    "incomplete": "exit code 4",
+    "too_few_rows": "exit code 2",
+    "blocked": "exit code 3 (probe --fail-blocked)",
+    "error": "exit code 1"
+  },
+  "page_outcomes": {
+    "ok": "the page was fetched and classified as real content; rows may be any count",
+    "empty": "the page was fetched and classified ok, but extracted zero rows",
+    "not_found": "HTTP 404 or 410",
+    "blocked": "a challenge page, a plain 403, or no proxy was available for the host",
+    "rate_limited": "HTTP 429, or 419 without challenge markers",
+    "error": "no response, a 5xx, or another status that is not a wall"
+  },
+  "incomplete_outcomes": [
+    "blocked",
+    "rate_limited",
+    "error"
+  ],
   "artifacts": [
     {
       "path": "--out value (default out.csv); - writes the dataset to stdout",
@@ -22,6 +45,12 @@
       "format": "inferred from the extension, else the config `output:` key",
       "schema": "schema/dataset_schema.json#/datasets/item_records",
       "rows": "every scraped row (no `_change` column)"
+    },
+    {
+      "path": "--report value, when given",
+      "format": "jsonl",
+      "schema": "schema/output_schema.json#/$defs/page_outcome",
+      "rows": "one JSON object per attempted page, in page order, whatever the run's exit code"
     }
   ],
   "stdout": [
@@ -29,13 +58,151 @@
   ],
   "stderr": [
     "[probe] <url> -> tier <t> (<note>)   (tier: auto only)",
-    "[done] <pages> pages, <n> unique items",
+    "[ladder] <url>: t<tier> -> t<tier+1> (<challenge|blocked|error>)",
+    "[pages] <from>..<to> capped at 100 pages (<from>..<capped>)",
+    "[done] <pages> pages: <n> ok, <n> empty, <n> not_found, <n> blocked, <n> rate_limited, <n> error (HTTP <status> on <path>)",
+    "[rows] <n> unique items",
     "[since] <n> new, <n> changed, <n> unchanged vs <PREV>",
     "[snapshot] <path> (<n> rows)",
     "[verify] <path>: <n> row(s), minimum <min>",
     "[verify] sample (<k>):",
     "  <json record>",
     "[verify] OK | [verify] FAIL: <reason>",
+    "[run] incomplete: <n> page(s) blocked/rate-limited/errored; rows may be missing (exit 4; --accept-partial to accept)",
     "[run] config error: <Exc>: <msg> | [run] fetch error: <Exc>: <msg>"
-  ]
+  ],
+  "$defs": {
+    "page_outcome": {
+      "type": "object",
+      "description": "One attempted page. Written to --report (JSONL) and returned by the MCP `scrape` tool in `pages`.",
+      "required": [
+        "url",
+        "outcome",
+        "status",
+        "rows",
+        "attempts",
+        "steps",
+        "proxy_group",
+        "elapsed_ms",
+        "note"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "url": {
+          "type": "string",
+          "description": "the page URL that was fetched"
+        },
+        "outcome": {
+          "type": "string",
+          "enum": [
+            "ok",
+            "empty",
+            "not_found",
+            "blocked",
+            "rate_limited",
+            "error"
+          ]
+        },
+        "status": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "HTTP status, 0 when no response arrived"
+        },
+        "rows": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "rows extracted from this page after dedupe"
+        },
+        "attempts": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "fetch attempts spent on this page (1 + retries/climbs used)"
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^t[123](@.+)?$"
+          },
+          "description": "each rung tried, in order, with the proxy group when one was leased, e.g. [\"t1\", \"t1@dc-b\", \"t2\"]"
+        },
+        "proxy_group": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "group label of the leased proxy, or null when fetching directly; never a proxy address"
+        },
+        "elapsed_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "note": {
+          "type": "string",
+          "description": "why the page ended this way, e.g. 'challenge page: cloudflare' or 'max_tier 2 reached'"
+        }
+      }
+    },
+    "mcp_scrape": {
+      "type": "object",
+      "description": "The MCP `scrape` tool's result object. Every tool result is a JSON object on the wire, including refusals; a tool never raises.",
+      "required": [
+        "status",
+        "rows",
+        "row_count",
+        "dataset_path",
+        "pages",
+        "notes"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "complete",
+            "incomplete",
+            "too_few_rows",
+            "blocked",
+            "error"
+          ]
+        },
+        "rows": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          },
+          "description": "up to max_rows rows (default 50, cap 500)"
+        },
+        "row_count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "the true total before truncation"
+        },
+        "dataset_path": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "full JSONL dataset under <workdir>/.certainlyscraped/, null on an error"
+        },
+        "pages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/page_outcome"
+          }
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "clamps, truncation and refusals, in the order they applied"
+        },
+        "private_refused": {
+          "type": "boolean",
+          "description": "present and true when the private-address guard refused the target"
+        }
+      }
+    }
+  }
 }

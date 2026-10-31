@@ -1,13 +1,13 @@
 # Writing selectors
 
-A scrapeforge config needs two kinds of selector: one that matches **each item** on the page (a product card, a table row, a search result) and, inside each item, one per **field** (title, price, link). This guide gets you from a URL to a working config, and explains what to do when a selector matches nothing.
+A certainlyscraped config needs two kinds of selector: one that matches **each item** on the page (a product card, a table row, a search result) and, inside each item, one per **field** (title, price, link). This guide gets you from a URL to a working config, and explains what to do when a selector matches nothing.
 
 ## The five-minute workflow
 
 ```bash
-scrapeforge init https://books.toscrape.com/          # guess a config, preview it
-scrapeforge try https://books.toscrape.com/ "p.price_color" --in "article.product_pod"
-scrapeforge run books-toscrape.yaml --out books.csv
+certainlyscraped init https://books.toscrape.com/          # guess a config, preview it
+certainlyscraped try https://books.toscrape.com/ "p.price_color" --in "article.product_pod"
+certainlyscraped run books-toscrape.yaml --out books.csv
 ```
 
 1. **`init`** finds the block repeated most on the page, writes a commented config, and prints a coverage report:
@@ -26,18 +26,18 @@ scrapeforge run books-toscrape.yaml --out books.csv
 3. **`fetch`** saves the page once so you can iterate offline, without hitting the site on every attempt:
 
    ```bash
-   scrapeforge fetch https://books.toscrape.com/ --out page.html
-   scrapeforge try page.html "h3 a" --in "article.product_pod" --attr title
-   scrapeforge init page.html
+   certainlyscraped fetch https://books.toscrape.com/ --out page.html
+   certainlyscraped try page.html "h3 a" --in "article.product_pod" --attr title
+   certainlyscraped init page.html
    ```
 
    A config's `url:` can also be a `file://` path while you develop it.
 
-## Your browser shows a different page than scrapeforge gets
+## Your browser shows a different page than certainlyscraped gets
 
-The browser's DevTools (Inspect Element) show the page **after** JavaScript ran. scrapeforge's tiers 1 and 2 get the HTML the server sent, **before** JavaScript runs. When a selector works in DevTools but `try` finds 0 matches:
+The browser's DevTools (Inspect Element) show the page **after** JavaScript ran. certainlyscraped's tiers 1 and 2 get the HTML the server sent, **before** JavaScript runs. When a selector works in DevTools but `try` finds 0 matches:
 
-- Look at what scrapeforge actually receives: `scrapeforge fetch <url>`, then open `page.html` in an editor. Or use the browser's **View Page Source** (not Inspect), which shows the same thing.
+- Look at what certainlyscraped actually receives: `certainlyscraped fetch <url>`, then open `page.html` in an editor. Or use the browser's **View Page Source** (not Inspect), which shows the same thing.
 - If the items are not in that HTML, look for [embedded JSON](#embedded-json) before reaching for a browser tier.
 
 ## Choosing an item selector
@@ -110,7 +110,7 @@ Many pages that render with JavaScript still ship their data inside the HTML:
 | `var:NAME` | `window.NAME = {...}` in a script | many React and Vue storefronts (`__INITIAL_STATE__`, `__APOLLO_STATE__`) |
 | a CSS selector | the text of that `<script>` | anything else, e.g. `script#product-data` |
 
-`scrapeforge probe <url>` lists what it finds, including paths to the longest lists. Then:
+`certainlyscraped probe <url>` lists what it finds, including paths to the longest lists. Then:
 
 ```yaml
 items:
@@ -131,7 +131,7 @@ fields:
   price: { path: offers.price, type: float }
 ```
 
-Paths are dotted keys. A number indexes a list (`images.0`), and `*` fans out over a list or object (`itemListElement.*.item`). `scrapeforge init --json` builds this kind of config for you.
+Paths are dotted keys. A number indexes a list (`images.0`), and `*` fans out over a list or object (`itemListElement.*.item`). `certainlyscraped init --json` builds this kind of config for you.
 
 ## Troubleshooting
 

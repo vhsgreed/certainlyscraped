@@ -35,6 +35,7 @@ Homepage = "https://github.com/vhsgreed/certainlyscraped"
 packages = ["certainlyscraped", "scrapeforge"]
 
 [tool.setuptools.dynamic]
+# Single-sourced: certainlyscraped/__init__.py sets 0.4.0.
 version = { attr = "certainlyscraped.__version__" }
 
 [tool.pytest.ini_options]

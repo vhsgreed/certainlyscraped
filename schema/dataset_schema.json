@@ -1,12 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "scrapeforge dataset contract",
-  "description": "Machine-readable contract for every dataset scrapeforge writes. One row per extracted item. Field names for item records come from the config's `fields:` block; probes and pagination probes emit fixed fields. Only fields the code actually emits are listed.",
-  "version": "0.3.0",
-  "updated": "2026-09-23",
+  "title": "certainlyscraped dataset contract",
+  "description": "Machine-readable contract for every dataset certainlyscraped writes. One row per extracted item. Field names for item records come from the config's `fields:` block; probes and pagination probes emit fixed fields. Only fields the code actually emits are listed.",
+  "version": "0.4.0",
+  "updated": "2026-10-31",
   "datasets": {
     "item_records": {
-      "produced_by": "scrapeforge run <config.yaml>",
+      "produced_by": "certainlyscraped run <config.yaml>",
       "formats": [
         "csv",
         "json",
@@ -164,7 +164,7 @@
       }
     },
     "probe_records": {
-      "produced_by": "scrapeforge batchprobe <urls.txt> --out results.csv",
+      "produced_by": "certainlyscraped batchprobe <urls.txt> --out results.csv",
       "format": "csv",
       "row_unit": "one probed URL",
       "fields": {
@@ -205,7 +205,7 @@
       }
     },
     "pagination_records": {
-      "produced_by": "scrapeforge pageprobe <urls.txt> --out matrix.csv",
+      "produced_by": "certainlyscraped pageprobe <urls.txt> --out matrix.csv",
       "format": "csv",
       "row_unit": "one probed URL",
       "fields": {

@@ -1,22 +1,32 @@
-# scrapeforge
+# certainlyscraped
 
-[![tests](https://github.com/vhsgreed/scrapeforge/actions/workflows/tests.yml/badge.svg)](https://github.com/vhsgreed/scrapeforge/actions/workflows/tests.yml)
-[![live check](https://github.com/vhsgreed/scrapeforge/actions/workflows/live.yml/badge.svg)](https://github.com/vhsgreed/scrapeforge/actions/workflows/live.yml)
+A hybrid scraper with escalating effort.
 
-**Turn a listing page into a CSV in two commands.** scrapeforge looks at the page, writes the config for you, fetches with the cheapest method that works, and fails loudly when it gets zero rows instead of reporting success.
+It starts with the cheapest fetch that works, escalates only when a page is
+blocked, and reports exactly what it got and why it stopped. It reads the page,
+writes a config for you, checks that every field filled, and turns a listing
+into rows instead of a promise.
 
-![scrapeforge demo: init, try, run](docs/demo.gif)
+[![tests](https://github.com/vhsgreed/certainlyscraped/actions/workflows/tests.yml/badge.svg)](https://github.com/vhsgreed/certainlyscraped/actions/workflows/tests.yml)
+[![live check](https://github.com/vhsgreed/certainlyscraped/actions/workflows/live.yml/badge.svg)](https://github.com/vhsgreed/certainlyscraped/actions/workflows/live.yml)
 
-## Quickstart
+![certainlyscraped demo: init, try, run](docs/demo.gif)
+
+## Quickstart: 20 seconds
 
 ```bash
-pip install git+https://github.com/vhsgreed/scrapeforge
+pip install "certainlyscraped[mcp]"
 
-scrapeforge init https://books.toscrape.com/catalogue/page-1.html --name books
-scrapeforge run books.yaml --out books.csv
+cscrape init https://books.toscrape.com/catalogue/page-1.html --name books
+cscrape run books.yaml
 ```
 
-`init` probes the site, finds the block that repeats on the page (product cards, table rows, results), guesses the fields, finds the next-page link, and shows how many items each field filled:
+`init` probes the site, finds the block that repeats on the page, guesses the
+fields and the next-page link, and prints how many items each field filled.
+`run` fetches the pages, writes `out.csv`, and fails loudly if it gets fewer
+rows than `--min-rows` (default 1) instead of reporting success.
+
+Real output from the daily live check:
 
 ```
 [probe] https://books.toscrape.com/catalogue/page-1.html -> tier 1 (static page)
@@ -29,14 +39,14 @@ field coverage on this page:
   availability    20/20 (100%)
 ```
 
-(Real output from the daily live check. The run that follows fetches 5 pages and verifies 100 rows.)
-
 The config is plain YAML you can read and edit:
 
 ```yaml
 name: books
 url: "https://books.toscrape.com/catalogue/page-1.html"
 tier: 1
+max_pages: 5
+rate_limit_sec: 2.0
 paginate:
   selector: "li.next a"
 items:
@@ -49,152 +59,221 @@ fields:
 output: csv
 ```
 
-## Help with selectors
+## The escalation ladder
 
-You never have to open DevTools to get started, and when you do edit a selector, scrapeforge tells you whether it works:
+Every page starts at the probed tier (or the config's `tier`) and climbs only
+when that rung fails.
 
-```bash
-scrapeforge try <url> "p.price_color" --in "article.product_pod"   # test a field
-scrapeforge fetch <url> --out page.html                             # save once, iterate offline
-scrapeforge try page.html "span.price"
-```
+| What came back | What happens next |
+|---|---|
+| rate limited (429, or 419 without a challenge) | try the page through another proxy group; if there is none, wait once (`Retry-After`, else `cooldown_sec`) and retry |
+| challenge page (Cloudflare, PerimeterX, DataDome markers) | keep the proxy, raise the tier by one, up to `max_tier` |
+| plain 403 | try another proxy group first; with none left, raise the tier |
+| 5xx or no response | retry once at the same tier, then raise it |
 
-```
-0 elements match 'span.price'
-hint: similar classes on this page: div.product_price (20), p.price_color (20)
-```
+Once a site escalates, later pages on that site start at the new level (`steps`
+in the page report show the climb, for example `["t1", "t1@dc-b", "t2"]`).
 
-`try` also flags pages rendered by JavaScript, points at embedded JSON when a page has it, and warns about brittle DevTools "Copy selector" paths. **[docs/selectors.md](docs/selectors.md)** is the full guide: the workflow, choosing selectors that survive site updates, a CSS cheat sheet, every field option, and a troubleshooting table.
+### Tiers
 
-## JavaScript pages without a browser
-
-Many pages that render with JavaScript still ship their data inside the HTML: JSON-LD, Next.js `__NEXT_DATA__`, or `window.__INITIAL_STATE__ = {...}`. `probe` lists what a page carries, and `init` falls back to it when there is no HTML to select:
-
-```yaml
-url: https://quotes.toscrape.com/js/      # the HTML has no quotes; the script does
-items:
-  json: "var:data"
-fields:
-  text:   { path: text }
-  author: { path: author.name }
-  tags:   { path: "tags.*", all: true, join: "|" }
-```
-
-That is plain HTTP at tier 1. No browser, and checked daily.
-
-## Clean values, not strings to fix later
-
-```yaml
-price:  { selector: ".price", type: float }                 # "£1,299.50" -> 1299.5
-price:  { selector: ".pris", type: float, decimal: "," }    # "1.299,50 kr" -> 1299.5
-sku:    { selector: ".meta", regex: "SKU: (\\w+)" }
-tags:   { selector: "a.tag", all: true, join: "|" }
-url:    { selector: "a", attr: href, absolute: true }
-stock:  { selector: ".stock", default: "unknown" }
-```
-
-## Watch for changes
-
-Output only what is new or changed since the last run. This is useful for prices, listings and job boards:
-
-```bash
-scrapeforge run shop.yaml --since state.csv --snapshot state.csv --key url --out changes.csv
-```
-
-`changes.csv` gets a `_change` column (`new` or `changed`). `state.csv` keeps the full picture for next time. The row-count check still applies to everything scraped, so a quiet day passes and a broken selector fails.
-
-## Pipes and Python
-
-```bash
-scrapeforge run examples/quotes-toscrape.yaml --out - | jq -r .author | sort | uniq -c
-```
-
-```python
-from scrapeforge import scrape
-
-result = scrape("examples/books-toscrape.yaml")
-cheap = [r for r in result.rows if r["price"] < 20]
-```
-
-`scrape()` accepts a YAML path or a dict, returns rows without writing files, and takes a `fetcher=` for custom transports.
-
-## How it fetches
-
-| Tier | Tool | Handles |
+| Tier | What it is | What it costs |
 |---|---|---|
-| 1 | `httpx` (plain HTTP) | Static HTML: blogs, docs, directories, most indie sites |
-| 2 | `curl_cffi` (TLS impersonation) | Sites that reject Python's TLS fingerprint but serve real HTML to a browser fingerprint |
-| 3 | `scrapling` / `cloakbrowser` / `playwright` | Browser-class walls. Optional (`pip install "scrapeforge[tier3] @ git+https://github.com/vhsgreed/scrapeforge"`), heavy, and never promised for a specific site |
+| 1 | `httpx`, plain HTTP | milliseconds per page, almost no install |
+| 2 | `curl_cffi`, TLS impersonation | a real Python dependency; a site that rejects Python's TLS fingerprint may still serve it real HTML |
+| 3 | a browser stack (`scrapling`, `cloakbrowser` or `playwright`) | an optional, heavy extra; used only with `max_tier: 3` and never promised for a specific site |
 
-`tier: auto` probes first and picks the lowest tier that returns a real page. `scrapeforge probe <url>` shows the verdict. If a site is out of reach, you find out before you build on it.
+`tier: auto` probes first and picks the lowest tier that returns a real page.
+A tier is not a promise: it is where the ladder starts.
 
-### What works (measured, never assumed)
+## Outcomes and exit codes
 
-| Target | Tier | Status |
-|---|---|---|
-| Hacker News, books.toscrape, quotes.toscrape, quotes.toscrape/js | 1 | checked daily by the [live check](.github/workflows/live.yml), including `init` from scratch |
-| AliExpress, Walmart, Zillow | 2 | real pages via curl_cffi, 2026-08-29 to 2026-09-11 |
-| eBay, Etsy, Booking, IMDb, Stack Overflow, Indeed, Reddit, Google | n/a | walled (Akamai, Cloudflare, PerimeterX, DataDome), 2026-08-29 to 2026-09-09 |
+One record per page, available with `--report report.jsonl` and in the MCP
+response's `pages` field:
 
-Reachability depends on your IP and the day. [VERIFIED-SITES.md](VERIFIED-SITES.md) has the dated evidence per site, and `results-stress-test-2026-08-29.csv` has verdicts for 150 sites (103 deliverable, 37 blocked, 10 unreachable). Probe per job.
+```json
+{"url": "https://httpbin.org/status/403", "outcome": "blocked", "status": 403, "rows": 0, "attempts": 2, "steps": ["t1", "t2"], "proxy_group": null, "elapsed_ms": 1358, "note": "max_tier 2 reached"}
+```
 
-## Verify by data, not by exit code
+`outcome` is one of `ok`, `empty`, `blocked`, `rate_limited`, `not_found`,
+`error`. A run also prints one summary line:
 
-A run that exits 0 with an empty dataset has proven nothing, so every `run` asserts a row count and prints a sample:
+```
+[done] 2 pages: 1 ok, 1 blocked (HTTP 403 on /status/403)
+```
 
 | Exit code | Meaning |
 |---|---|
-| 0 | at least `--min-rows` records (default 1) |
+| 0 | complete: at least `--min-rows`, no incomplete page |
 | 1 | config, I/O or fetch error |
-| 2 | fewer than `--min-rows` records, including the empty result |
+| 2 | fewer than `--min-rows` rows (2 wins over 4) |
 | 3 | `probe --fail-blocked`: the target is walled |
+| 4 | incomplete: at least `--min-rows`, but one or more pages ended `blocked`, `rate_limited` or `error` after all retries |
 
-`scrapeforge verify data.csv --min-rows 10` checks any CSV, JSON or JSONL file after the fact. The schemas in [`schema/`](schema) describe every dataset and the `run` contract.
+Exit 4 is narrow on purpose. A trailing `not_found` or `empty` page past the
+end of a range does not count, and neither does a page that succeeded on retry.
+`--accept-partial` maps 4 to 0 for scripts that only check for zero. A run that
+loses one page still writes the rows it did get, and the report says which page
+is missing.
 
-## Commands
+## MCP server (for agents)
 
-| Command | Does |
+```bash
+pip install "certainlyscraped[mcp]"
+certainlyscraped mcp
+```
+
+Client configuration:
+
+```json
+{
+  "mcpServers": {
+    "certainlyscraped": {
+      "command": "certainlyscraped",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+Four tools, each a thin call into the same API:
+
+| Tool | Returns |
 |---|---|
-| `init <url\|file>` | guess a config from a listing page, preview it, report field coverage |
-| `try <url\|file> <selector>` | test a selector (`--in ITEMS` to test it as a field) |
-| `fetch <url>` | save the HTML scrapeforge sees, for offline work |
-| `probe <url>` | tier verdict plus any embedded JSON (`--fail-blocked` exits 3 when walled) |
-| `run <config>` | scrape, write CSV/JSON/JSONL (`--out -` for stdout), verify the row count |
-| `verify <file>` | row-count check and sample for an existing dataset |
-| `batchprobe <urls.txt>` | tier verdicts for many sites, to CSV |
-| `pageprobe <urls.txt>` | certify that pagination actually advances (page 2 differs from page 1) |
+| `probe(url)` | tier verdict, block markers, embedded JSON found |
+| `init(url)` | config YAML plus field coverage |
+| `try_selector(url, selector, within?)` | match count, sample values, hints |
+| `scrape(config, min_rows?, max_rows?)` | `status`, rows (up to `max_rows`, default 50), the true row count, a dataset path, and per-page outcomes |
 
-Every command has `--help`.
+`config` is inline YAML or JSON text, never a path. `status` is one of
+`complete`, `incomplete`, `too_few_rows`, `blocked`, `error`, with the same
+meaning as exit codes 0, 4, 2, 3 and 1. A bad request is still a status dict:
+a tool never raises into the JSON-RPC channel.
 
-## Why not just use X
+Private addresses are refused by default: loopback, RFC 1918, link-local
+(including `169.254.169.254`) and unique-local IPv6, checked after DNS
+resolution and on every redirect hop. `--allow-private` turns that off for
+local development. The CLI does not refuse private addresses; only the MCP
+server does. Proxies come only from the server's own `--proxies proxies.yaml`,
+never from a tool argument, and file reads and datasets stay inside the working
+directory.
 
-| Approach | What you still do yourself |
-|---|---|
-| `requests` / `httpx` | Everything. Protected sites return a challenge page and you get zero rows without noticing. |
-| `curl_cffi` alone | Know which sites need it, and check the body is real rather than a challenge page. |
-| Scrapling | A browser stack to install, and a per-site decision about which mode to use. |
-| Crawlee, Scrapy | A framework to learn for what is often one listing and its pages. |
-| scrapeforge | Check the coverage report. The probe picks the tier, `init` writes the config, and `run` asserts it got rows. |
+## Proxies
+
+One proxy still works and becomes a pool of one:
+
+```yaml
+proxy: "http://10.1.2.3:8000"
+```
+
+A pool names groups so a 403 or a 429 can try a different network before paying
+for a heavier tier:
+
+```yaml
+proxies:
+  list: proxies.txt          # one URL per line, optional "# group" label
+  gateway:                   # one generic provider gateway
+    template: "http://{user}-country-{country}-session-{session}:{password}@gw.example:7000"
+    user: myuser
+    password_env: GATEWAY_PASSWORD
+    country: se
+    session: rotate          # or sticky
+  per_proxy_rate_sec: 1.0
+  cooldown_sec: 300
+  max_retries: 3
+```
+
+`proxies.txt`:
+
+```
+http://user:pass@10.1.2.3:8000 # dc-a
+http://10.1.9.9:8000           # dc-b
+http://10.1.1.7:8000
+```
+
+Groups are the label after `#`, else an IPv4 `/16` or IPv6 `/48` prefix.
+A proxy that is walled for one host is parked for that host for
+`cooldown_sec`; it is not removed from the pool. `session: rotate` generates a
+new token per request, `sticky` keeps one per host and worker.
+
+Passwords never belong in the main config. Put them in a dedicated proxies
+file passed with `--proxies`, or in the environment through `password_env`.
+A password inside an inline `proxy:`/`proxies:` URL in the committed YAML is
+refused with a message naming both alternatives. Every log line, page outcome
+and MCP response shows the group label, never the proxy URL or password.
+
+Precedence for `run`: `--no-proxy` > `--proxies FILE` >
+`CERTAINLYSCRAPED_PROXIES` > the config. `--no-proxy` ignores every configured
+proxy and fetches directly (MCP has no such flag; without `--proxies` it has no
+pool at all).
+
+Speed comes from many hosts or a proxy pool, not from threads alone. With no
+pool, one host gets at most one request per `rate_limit_sec` no matter the
+`concurrency`, so a single-host `pages:` job is still paced by the site.
+
+## Parallel pages
+
+```yaml
+pages:
+  template: "https://news.ycombinator.com/news?p={n}"
+  from: 1
+  to: 10
+concurrency: 4
+```
+
+Or an explicit list:
+
+```yaml
+urls:
+  - "https://example.com/a"
+  - "https://example.com/b"
+```
+
+Rows are emitted in page order regardless of which response arrived first.
+A `pages:` range stops early after two consecutive `not_found` or `empty`
+pages at the end of the range.
+
+## More commands
+
+```bash
+cscrape try <url> "p.price_color" --in "article.product_pod"   # test a field
+cscrape fetch <url> --out page.html                             # save once, iterate offline
+cscrape probe <url>                                             # tier verdict
+cscrape verify data.csv --min-rows 10                           # check a dataset after the fact
+```
+
+`try` also flags pages rendered by JavaScript, points at embedded JSON, and
+warns about brittle DevTools "Copy selector" paths. [docs/selectors.md](docs/selectors.md)
+is the full guide.
 
 ## What it will not do
 
 - Log in, get past login walls, or use credentials that are not yours.
-- Beat Cloudflare managed challenges, PerimeterX or DataDome from a single IP. That takes paid residential proxies, and even then it is an arms race.
 - Promise that a site works today because it worked on another day.
+- Beat fingerprint or JavaScript challenges (Cloudflare managed challenge,
+  PerimeterX, DataDome) with proxies. Those pages report `blocked`; a proxy you
+  bring gets past IP bans, IP-range bans and rate limits, not a challenge.
 - Ship scraped data. It ships the tool.
 
-## Legal
+## Why trust the numbers
 
-Public data only. Respect each site's terms and rate limits. No login-gated content, no credential abuse.
+Every run records one outcome per page, and the daily live check scrapes the
+same example sites asserted at exit 0, so a quiet regression shows up as a red
+check rather than a friendly empty CSV.
+
+## The old name
+
+`scrapeforge` still works as a command and as an import until 0.5.0, and prints
+a deprecation notice on stderr. New code should use `certainlyscraped` or
+`cscrape`; the old name is removed in 0.5.0.
 
 ## Development
 
 ```bash
-git clone https://github.com/vhsgreed/scrapeforge && cd scrapeforge
+git clone https://github.com/vhsgreed/certainlyscraped && cd certainlyscraped
 pip install -e ".[dev]"
 python -m pytest -q
 ```
 
-Tests run offline against saved pages in `tests/fixtures/`. CI runs them on Python 3.11 to 3.14. The live check runs the examples against real sites daily, and pushing a `v*` tag builds and checks a release. Publishing to PyPI is opt-in, see [release.yml](.github/workflows/release.yml).
-
+Tests run offline against saved pages in `tests/fixtures/`. CI runs them on
+Python 3.11 to 3.14. The live check runs the examples against real sites daily.
 MIT licensed. Part of the [vhsgreed](https://vhsgreed.win) toolset.

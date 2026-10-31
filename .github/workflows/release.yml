@@ -1,6 +1,6 @@
 name: release
 
-# Push a tag like v0.3.0 to test, build and check the package; the wheel
+# Push a tag like v0.4.0 to test, build and check the package; the wheel
 # and sdist are kept as workflow artifacts.
 #
 # Publishing to PyPI is off until you opt in. To publish:
