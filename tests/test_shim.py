@@ -13,6 +13,26 @@ def test_old_import_warns_and_aliases():
     assert sf.scrape is certainlyscraped.scrape
 
 
+def test_attribute_path_aliases():
+    import scrapeforge
+    import certainlyscraped.fetch
+
+    assert scrapeforge.fetch is certainlyscraped.fetch
+
+
+def test_python_m_scrapeforge_runs():
+    import subprocess, sys
+
+    result = subprocess.run(
+        [sys.executable, "-m", "scrapeforge", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "renamed to certainlyscraped" in result.stderr
+    assert "RuntimeWarning" not in result.stderr
+
+
 def test_old_command_prints_notice(capsys):
     import scrapeforge
     try:
