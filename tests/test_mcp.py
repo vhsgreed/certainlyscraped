@@ -623,8 +623,11 @@ def test_pages_range_is_capped_with_a_note(tmp_path):
     "{template: 'example.com/p={n}', from: 1, to: 2}",
     # A scheme is not enough: without a host the guard dies after the
     # config was accepted.
-    "{template: 'http://', from: 1, to: 2}",
     "{template: 'http:///p={n}', from: 1, to: 2}",
+    # A host made only of the placeholder is still no host at all.
+    "{template: 'http://{n}', from: 1, to: 2}",
+    "{template: 'http://{n}/x', from: 1, to: 2}",
+    "{template: 'http://{host}/p={n}', from: 1, to: 2}",
 ])
 def test_malformed_pages_is_a_status_dict(tmp_path, pages):
     def boom(cfg, **kw):  # pragma: no cover
@@ -635,6 +638,16 @@ def test_malformed_pages_is_a_status_dict(tmp_path, pages):
     assert not raw.is_error
     assert res["status"] == "error"
     assert any("pages" in n for n in res["notes"])
+
+
+def test_pages_template_with_a_real_host_and_placeholder_path_passes(tmp_path):
+    res, raw, seen = _scrape_with_config(
+        tmp_path, "pages:\n"
+                  "  template: 'http://example.com/{n}'\n"
+                  "  from: 1\n"
+                  "  to: 2\n" + BOOKS_CFG, html="<html></html>")
+    assert not raw.is_error
+    assert seen["cfg"]["pages"]["template"] == "http://example.com/{n}"
 
 
 def test_urls_are_capped_with_a_note(tmp_path):

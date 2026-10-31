@@ -10,8 +10,6 @@ turns a listing into rows instead of a promise.
 [![tests](https://github.com/vhsgreed/certainlyscraped/actions/workflows/tests.yml/badge.svg)](https://github.com/vhsgreed/certainlyscraped/actions/workflows/tests.yml)
 [![live check](https://github.com/vhsgreed/certainlyscraped/actions/workflows/live.yml/badge.svg)](https://github.com/vhsgreed/certainlyscraped/actions/workflows/live.yml)
 
-![certainlyscraped demo recorded before the rename: init, try, run](docs/demo.gif)
-
 ## Quickstart: 20 seconds
 
 ```bash
@@ -46,6 +44,8 @@ certainlyscraped mcp
 
 That gives the agent `probe`, `init`, `try_selector` and `scrape`; the full
 contract is under [MCP server (for agents)](#mcp-server-for-agents).
+
+![certainlyscraped demo recorded before the rename: init, try, run](docs/demo.gif)
 
 Real output from the daily live check:
 
@@ -226,9 +226,10 @@ Passwords never belong in the main config. Put them in a dedicated proxies
 file passed with `--proxies`, or in the environment through `password_env`.
 A password inside an inline `proxy:`/`proxies:` URL in the committed YAML is
 refused with a message naming both alternatives. Page outcomes and MCP
-responses carry the group label, never the proxy URL or password; a log line
-for a failing proxy shows the redacted proxy URL, credentials masked, because
-that address is the diagnosis.
+responses carry the group label, never the proxy URL or password. A failing
+proxy appears in the page outcome (`error`, its note, and `proxy_group`) and in
+`[run] fetch error:` if the exception escapes; no log line quotes the address,
+so the group label and the error text are the diagnosis.
 
 Precedence for `run`: `--no-proxy` > `--proxies FILE` >
 `CERTAINLYSCRAPED_PROXIES` > the config. `--no-proxy` ignores every configured
@@ -293,7 +294,8 @@ check rather than a friendly empty CSV.
 
 The `scrapeforge` command still works until 0.5.0 and prints a deprecation
 notice on stderr; `import scrapeforge` also works and raises a
-`DeprecationWarning`, which Python hides by default. New code should use
+`DeprecationWarning`, which Python shows when the import runs in `__main__`
+(the usual script case) and hides inside imported modules. New code should use
 `certainlyscraped` or `cscrape`; the old name is removed in 0.5.0.
 
 ## Development

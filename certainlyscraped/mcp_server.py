@@ -198,6 +198,20 @@ def _bounded_int(name: str, value, default: int, low: int, high: int,
     return n
 
 
+def _host_problem(host) -> str | None:
+    """Why `host` cannot be fetched as a literal host, or None if it can.
+
+    An empty host dies in the guard after the config was accepted, and a host
+    made of a `{...}` placeholder (``http://{n}``) is never a host at all: the
+    URL is used as written, so the fetch would go to a DNS name with braces.
+    """
+    if not host:
+        return "must name a host, not just a scheme"
+    if "{" in host or "}" in host:
+        return "must name a real host, not a {placeholder}"
+    return None
+
+
 def _check_pages(value, notes: list[str]) -> dict:
     """A `pages:` mapping, validated and range-capped before any fetch.
 
@@ -213,10 +227,9 @@ def _check_pages(value, notes: list[str]) -> dict:
     if not template.lower().startswith(("http://", "https://")):
         raise _ConfigError("pages.template must be an absolute http:// or "
                            "https:// URL containing {n}")
-    if not urlsplit(template).hostname:
-        raise _ConfigError(
-            f"pages.template must name a host, not just a scheme: "
-            f"{template!r}")
+    problem = _host_problem(urlsplit(template).hostname)
+    if problem:
+        raise _ConfigError(f"pages.template {problem}: {template!r}")
     bounds = {}
     for key in ("from", "to"):
         raw = value.get(key, 1)
@@ -257,9 +270,9 @@ def _check_urls(value, notes: list[str]) -> list[str]:
             raise _ConfigError(
                 f"urls[{i}] is not an absolute http:// or https:// URL: "
                 f"{url!r}")
-        if not urlsplit(url).hostname:
-            raise _ConfigError(
-                f"urls[{i}] must name a host, not just a scheme: {url!r}")
+        problem = _host_problem(urlsplit(url).hostname)
+        if problem:
+            raise _ConfigError(f"urls[{i}] {problem}: {url!r}")
         out.append(url)
     if len(out) > MAX_URLS:
         notes.append(f"urls capped at {MAX_URLS} of {len(out)}")

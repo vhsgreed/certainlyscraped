@@ -49,9 +49,10 @@ first release under the name `certainlyscraped`; earlier releases shipped as
   walled for one host cools down for that host only. `--proxies`,
   `--no-proxy` and `CERTAINLYSCRAPED_PROXIES` set precedence.
 - **Redaction everywhere.** Proxy URLs, hosts and passwords never appear in a
-  page outcome or an MCP response; only the group label is shown. A log line
-  for a failing proxy carries the redacted proxy URL (credentials masked),
-  because that address is the diagnosis.
+  page outcome or an MCP response; only the group label is shown. A failed
+  proxy shows up in the page outcome (`error`, its note and `proxy_group`) and
+  in `[run] fetch error:` when the exception escapes; no log line quotes the
+  address.
 
 ### Changed
 
@@ -65,4 +66,5 @@ first release under the name `certainlyscraped`; earlier releases shipped as
 
 - The `scrapeforge` command still works in 0.4.x and prints a rename notice on
   stderr; `import scrapeforge` also works and raises a `DeprecationWarning`
-  (hidden by default). Both are removed in 0.5.0.
+  (shown for `__main__`, hidden inside imported modules). Both are removed in
+  0.5.0.
