@@ -125,6 +125,19 @@ class FetchError(RuntimeError):
     pass
 
 
+def _transport_error(exc: BaseException) -> FetchError:
+    """A client library's own exception as a FetchError, message preserved.
+
+    Every transport call site converts here. ``Ladder._call`` only knows
+    FetchError, so a raw ``httpx.ConnectError`` would escape the ladder and
+    the page would be reported with no steps and no proxy group -- the run
+    could not say which rung or which proxy it died on. The class name goes
+    in the message because it is the diagnosis; redaction happens later, once
+    the caller knows its secrets.
+    """
+    return FetchError(f"{type(exc).__name__}: {exc}")
+
+
 def _redirect_location(status: int, headers) -> str | None:
     if status not in _REDIRECT_CODES:
         return None
@@ -174,21 +187,25 @@ def _lower_headers(headers) -> dict[str, str]:
 
 def _fetch_httpx(url, timeout, proxy, cookies, transport=None):
     import httpx
-    if transport is not None:
-        with httpx.Client(**_client_kwargs(timeout, proxy, cookies, transport,
-                                           follow_redirects=True)) as client:
-            r = client.get(url)
+    try:
+        if transport is not None:
+            with httpx.Client(**_client_kwargs(timeout, proxy, cookies,
+                                               transport,
+                                               follow_redirects=True)) as client:
+                r = client.get(url)
+            return (r.status_code, r.text,
+                    _lower_headers(getattr(r, "headers", None)))
+        kwargs = dict(timeout=timeout, follow_redirects=True,
+                      headers={"User-Agent": USER_AGENT})
+        if proxy:
+            kwargs["proxy"] = proxy
+        if cookies:
+            kwargs["cookies"] = cookies
+        r = httpx.get(url, **kwargs)
         return (r.status_code, r.text,
                 _lower_headers(getattr(r, "headers", None)))
-    kwargs = dict(timeout=timeout, follow_redirects=True,
-                  headers={"User-Agent": USER_AGENT})
-    if proxy:
-        kwargs["proxy"] = proxy
-    if cookies:
-        kwargs["cookies"] = cookies
-    r = httpx.get(url, **kwargs)
-    return (r.status_code, r.text,
-            _lower_headers(getattr(r, "headers", None)))
+    except httpx.HTTPError as exc:
+        raise _transport_error(exc) from exc
 
 
 def _guard_proxy(proxy, guard) -> None:
@@ -205,10 +222,15 @@ def _fetch_httpx_guarded(url, timeout, proxy, cookies, guard, transport):
     from urllib.parse import urljoin
 
     _guard_proxy(proxy, guard)
-    with httpx.Client(**_client_kwargs(timeout, proxy, cookies, transport,
-                                       follow_redirects=False)) as client:
-        return _guarded_get(client.get, url, guard, urljoin,
-                            lambda r: (r.status_code, r.text, r.headers))
+    try:
+        with httpx.Client(**_client_kwargs(timeout, proxy, cookies, transport,
+                                           follow_redirects=False)) as client:
+            return _guarded_get(client.get, url, guard, urljoin,
+                                lambda r: (r.status_code, r.text, r.headers))
+    except httpx.HTTPError as exc:
+        # The guard raises its own PrivateAddressError (or FetchError); only
+        # the client library's exceptions are ours to translate.
+        raise _transport_error(exc) from exc
 
 
 def _fetch_curl_cffi_guarded(url, timeout, proxy, cookies, guard):
@@ -229,8 +251,11 @@ def _fetch_curl_cffi_guarded(url, timeout, proxy, cookies, guard):
     def get(u):
         return cr.get(u, **kwargs)
 
-    return _guarded_get(get, url, guard, urljoin,
-                        lambda r: (r.status_code, r.text, r.headers))
+    try:
+        return _guarded_get(get, url, guard, urljoin,
+                            lambda r: (r.status_code, r.text, r.headers))
+    except cr.RequestsError as exc:
+        raise _transport_error(exc) from exc
 
 
 def _guarded_get(get, url, guard, urljoin, unpack):
@@ -261,7 +286,10 @@ def _fetch_curl_cffi(url, timeout, proxy, cookies):
         kwargs["proxy"] = proxy
     if cookies:
         kwargs["cookies"] = cookies
-    r = cr.get(url, **kwargs)
+    try:
+        r = cr.get(url, **kwargs)
+    except cr.RequestsError as exc:
+        raise _transport_error(exc) from exc
     return (r.status_code, r.text,
             _lower_headers(getattr(r, "headers", None)))
 
@@ -287,6 +315,22 @@ def _playwright_proxy(proxy: str | None) -> dict | None:
 
 
 def _fetch_browser(url, timeout, proxy, cookies) -> tuple[int, str]:
+    """Tier 3, with its backends' own exceptions turned into FetchError.
+
+    A browser that fails to launch, navigate or read a page raises
+    playwright/scrapling's own error; the ladder must see a FetchError or the
+    page loses which rung and which proxy it died on. FetchError itself (an
+    unavailable backend) passes through unchanged.
+    """
+    try:
+        return _fetch_browser_inner(url, timeout, proxy, cookies)
+    except FetchError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - any backend's runtime failure
+        raise _transport_error(exc) from exc
+
+
+def _fetch_browser_inner(url, timeout, proxy, cookies) -> tuple[int, str]:
     """Amazon/eBay-class. Try scrapling (patchright stealth + cloudflare
     solve), then cloakbrowser, then plain playwright. None are magic; the
     probe-first flow decides whether tier 3 is even offered.

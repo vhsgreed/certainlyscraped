@@ -955,3 +955,29 @@ def test_proxy_precedence_flag_then_env_then_config(tmp_path, monkeypatch):
     assert groups() == ["envg"]                      # env beats config
     assert groups("--proxies", str(flag)) == ["flagg"]  # flag beats env
     assert groups("--no-proxy") is None              # flag off beats all
+
+
+# --- fix round 3: mcp --proxies outranks the environment ------------------
+
+def test_mcp_proxies_flag_beats_the_environment(tmp_path, monkeypatch):
+    """--proxies FILE is the whole set for `mcp` too (R35), as for `run`."""
+    pytest.importorskip("mcp")
+    import certainlyscraped.mcp_server as mcp_server
+
+    seen = {}
+
+    class FakeServer:
+        def run(self, transport):
+            seen["transport"] = transport
+
+    def fake_build(workdir, **kwargs):
+        seen.update(kwargs)
+        return FakeServer()
+
+    monkeypatch.setattr(mcp_server, "build_server", fake_build)
+    path = tmp_path / "p.txt"
+    path.write_text("http://flag:1 # flagg\n", encoding="utf-8")
+    monkeypatch.setenv("CERTAINLYSCRAPED_PROXIES", "http://env:1 # envg")
+    cli.main(["mcp", "--proxies", str(path)])
+    assert seen["transport"] == "stdio"
+    assert seen["pool"].groups() == ["flagg"]

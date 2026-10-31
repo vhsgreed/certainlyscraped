@@ -379,9 +379,17 @@ class Ladder:
         challenge proves the proxy reached the site, so it is the site that
         is walled, not the endpoint -- the pool leaves that pair alone.
         """
-        if self.pool is not None and proxy is not None:
+        if self.pool is None or proxy is None:
+            return
+        # The documented pool interface is report(proxy, host, outcome); the
+        # challenge keyword is an extension. A third-party or test pool that
+        # implements only the documented form must not raise TypeError from
+        # deep inside the ladder.
+        try:
             self.pool.report(proxy, host, verdict.outcome,
                              challenge=bool(verdict.challenge))
+        except TypeError:
+            self.pool.report(proxy, host, verdict.outcome)
 
     def scrub(self, text: str) -> str:
         """Page notes go on to logs and datasets: no proxy credential there.

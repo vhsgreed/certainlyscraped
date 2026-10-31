@@ -228,7 +228,12 @@ def _server_pool(args):
     """The server's own proxy pool from `mcp --proxies PATH` (never an agent's).
 
     The file is a dedicated proxies file, so its URLs may carry a password
-    (R31); the operator's environment is honoured as it is for `run`.
+    (R31). Precedence is `run`'s (R35): the explicit ``--proxies`` file is the
+    whole set and outranks ``CERTAINLYSCRAPED_PROXIES``, which would otherwise
+    silently replace it (``proxy_source="flag"``). ``mcp`` has no
+    ``--no-proxy``: without ``--proxies`` the server has no pool at all, so
+    there is nothing to switch off. The environment is not honoured for
+    ``mcp`` -- it is not an input to the server's pool.
     """
     path = getattr(args, "proxies", None)
     if not path:
@@ -236,7 +241,8 @@ def _server_pool(args):
     try:
         pool = ProxyPool.from_config(
             {"proxies": read_proxies_file(path)},
-            base_dir=str(Path(path).resolve().parent), allow_userinfo=True)
+            base_dir=str(Path(path).resolve().parent), allow_userinfo=True,
+            proxy_source="flag")
     except (OSError, ValueError) as e:
         print(f"[mcp] proxies error: {redact(str(e))}", file=sys.stderr)
         sys.exit(EXIT_ERROR)

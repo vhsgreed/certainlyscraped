@@ -803,3 +803,80 @@ def test_fetch_accepts_a_proxy_object(monkeypatch):
     assert status == 200
     assert seen["proxy"] == "http://p:1"
     assert guarded == ["http://p:1", "https://h.test/1"]
+
+
+# --- fix round 3: transport failures carry their rung and proxy -----------
+
+def test_a_transport_failure_keeps_its_rung_and_proxy(monkeypatch):
+    """A ConnectError must reach the report as an error page that says
+    which rung and which proxy it died on (README: 'exactly what it got
+    and why it stopped')."""
+    import httpx
+
+    def boom(*args, **kwargs):
+        raise httpx.ConnectError("connection refused")
+
+    monkeypatch.setattr(httpx, "get", boom)
+    cfg = {"tier": 1, "max_tier": 1, "max_retries": 0, "rate_limit_sec": 0,
+           "concurrency": 1, "url": "https://h.test/1",
+           "urls": ["https://h.test/1"],
+           "proxies": ["http://a:1 # a"],
+           "items": {"selector": "li"},
+           "fields": {"t": {"selector": "a"}}}
+    result = api.scrape(cfg, log=None)
+    page = result.page_report[0]
+    assert page.outcome == "error"
+    assert page.steps == ["t1@a"]
+    assert page.proxy_group == "a"
+
+
+def test_a_pooled_429_then_a_transport_failure_keeps_the_lease():
+    from certainlyscraped.fetch import FetchError
+    from certainlyscraped.runner import run_parallel
+
+    pool, _ = pool_for(["http://a:1 # a"])
+    clock = FakeClock()
+    calls = []
+
+    def fetch_fn(url, tier, **kwargs):
+        calls.append((tier, kwargs.get("proxy")))
+        if len(calls) == 1:
+            return 429, "", {}
+        raise FetchError("ConnectError: connection refused")
+
+    ladder = Ladder({"max_retries": 1, "rate_limit_sec": 0, "cooldown_sec": 0},
+                    1, pool=pool, fetch_fn=fetch_fn, sleep=clock.sleep,
+                    gate=RateGate(0, clock=clock.clock, sleep=clock.sleep))
+    outcomes = run_parallel(ladder.fetch_page, ["https://h.test/1"],
+                            {"rate_limit_sec": 0}, lambda html, url: 1,
+                            gate=None)
+    page = outcomes[0]
+    assert page.outcome == "error"
+    assert page.steps == ["t1@a", "t1@a"]
+    assert page.proxy_group == "a"
+    assert [proxy for _, proxy in calls] == ["http://a:1", "http://a:1"]
+    # The error was reported as network-level: the pair is parked.
+    assert pool.acquire("h.test") is None
+
+
+# --- fix round 3: the documented pool interface still works ---------------
+
+class DocumentedPool:
+    """A pool implementing only report(proxy, host, outcome)."""
+
+    def __init__(self):
+        self.reports = []
+
+    def acquire(self, host):
+        return _Proxy("a")
+
+    def report(self, proxy, host, outcome):
+        self.reports.append((proxy.group, host, outcome))
+
+
+def test_a_pool_with_only_the_documented_report_signature_works():
+    pool = DocumentedPool()
+    ladder, _, _ = make([(200, OK)], pool=pool)
+    page = ladder.fetch_page("https://h.test/1")
+    assert page.status == 200
+    assert pool.reports == [("a", "h.test", "ok")]
