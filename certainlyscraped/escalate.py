@@ -8,7 +8,8 @@ for the rest of the run.
 One ``Ladder`` per scrape. It owns three things the rest of the pipeline must
 not duplicate:
 
-* the **pacing gate** -- ``gate.wait((host, group))`` before every attempt, so
+* the **pacing gate** -- ``gate.wait((host, proxy key))`` before every
+  attempt, so two proxies to one host each get their own slot and
   ``run_parallel``/``follow_links`` are handed ``gate=None`` and never charge
   a page a second wait;
 * the **retry budget** -- at most ``1 + max_retries`` attempts per page;
@@ -24,6 +25,7 @@ from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 from .fetch import FetchError, fetch, redact, tier3_available
+from .netguard import PrivateAddressError
 from .outcome import PageFetch, classify_fetch
 from .runner import RateGate
 
@@ -217,16 +219,27 @@ class Ladder:
         group: str | None = None
         tried_groups: set[str] = set()
         error_retried = False
+        error_switched = False
         backoff_used = False
         forced = None  # an outcome the ladder knows without a response
+        last_error: str | None = None
+        # R45: a tier reached only by climbing on an error is not sticky.
+        remember = True
         limit = 1 + self.max_retries
 
         def finish() -> PageFetch:
-            self._remember(host, tier)
+            if remember:
+                self._remember(host, tier)
+            # R42: a page that ended without a response says why it stopped
+            # (the last transport error), not the generic climb note. A climb
+            # note survives only when the final verdict came from a response.
+            final_note = note
+            if status == 0 and last_error:
+                final_note = last_error
             elapsed = int((time.monotonic() - started) * 1000)
             return PageFetch(status=status, html=html, attempts=len(steps),
                              steps=steps, proxy_group=group,
-                             elapsed_ms=elapsed, note=self.scrub(note),
+                             elapsed_ms=elapsed, note=self.scrub(final_note),
                              outcome=forced)
 
         # R33: a page leases one proxy for its whole life. The pool's park
@@ -261,9 +274,19 @@ class Ladder:
                 tried_groups.add(group)
             steps.append(f"t{tier}" + (f"@{group}" if group else ""))
 
-            self.gate.wait((host, group))
-            status, html, headers = self._call(url, tier, proxy)
+            self.gate.wait(self._pacing_key(host, proxy))
+            status, html, headers, error, terminal = self._call(url, tier,
+                                                                proxy)
+            if error:
+                last_error = error
             verdict = classify_fetch(url, status, html)
+
+            if terminal:
+                # R43: a policy refusal is final for this page -- no retry,
+                # no climb, no fetch from another rung or proxy.
+                forced = "error"
+                break
+
             self._report(proxy, host, verdict)
 
             if verdict.outcome in _TERMINAL:
@@ -273,7 +296,7 @@ class Ladder:
                 # Spec 4.2 rule 2: a different group first. No other group
                 # left means this is the proxy's pace, not the whole pool's
                 # problem -- keep the lease and back off once.
-                switched = self._alternate(host, tried_groups)
+                switched = self._alternate(host, tried_groups, "rate limited")
                 if switched is not None:
                     proxy = switched
                     continue
@@ -284,7 +307,12 @@ class Ladder:
                 if backoff_used or len(steps) >= limit:
                     break
                 backoff_used = True
-                if self._backoff_sleep(self._backoff(headers)):
+                delay = self._backoff(headers)
+                if self.log:
+                    # R46: a user must not see a silent hang.
+                    print(f"[ladder] {host}: rate limited, waiting {delay:g}s",
+                          file=self.log)
+                if self._backoff_sleep(delay):
                     break  # Ctrl-C: stop the page, keep the 429 verdict
                 continue
 
@@ -293,7 +321,7 @@ class Ladder:
                 # heavier tier. A challenge is not the proxy's fault (rule
                 # 3): climb on the lease.
                 if not verdict.challenge:
-                    switched = self._alternate(host, tried_groups)
+                    switched = self._alternate(host, tried_groups, "blocked")
                     if switched is not None:
                         proxy = switched
                         continue
@@ -306,8 +334,16 @@ class Ladder:
                 continue
 
             if verdict.outcome == "error":
-                # A 5xx / status 0 is the tier's (or the moment's) problem,
-                # not the proxy's: keep the lease.
+                # R45 (amends R33): no response at all is the proxy's
+                # problem -- one alternate() before the same-tier retry. A
+                # 5xx *is* a response, so it keeps the lease.
+                if (last_error is not None and self.pool is not None
+                        and not error_switched):
+                    error_switched = True
+                    switched = self._alternate(host, tried_groups, "error")
+                    if switched is not None:
+                        proxy = switched
+                        continue
                 if not error_retried:
                     # One same-tier retry (a reset connection, not a wall).
                     error_retried = True
@@ -316,6 +352,7 @@ class Ladder:
                 if climbed is None:
                     break
                 tier = climbed
+                remember = False
                 error_retried = False
                 continue
 
@@ -343,6 +380,14 @@ class Ladder:
         return min(delay, self.cooldown_sec)
 
     def _call(self, url: str, tier: int, proxy):
+        """(status, html, headers, error, terminal) for one attempt.
+
+        ``error`` is the transport failure's text (None when a response
+        arrived). ``terminal`` is True for a policy refusal -- R43: the
+        guard's PrivateAddressError ends the page, it is not retried or
+        climbed. The guard's resolve failure is an ordinary status-0 error
+        so the page still gets its retries and rungs.
+        """
         proxy_url = _proxy_url(proxy)
         if proxy_url is None and self.pool is None:
             proxy_url = self.proxy
@@ -350,27 +395,55 @@ class Ladder:
             result = self.fetch_fn(
                 url, tier, timeout=self.timeout, proxy=proxy_url,
                 cookies=self.cookies, guard=self.guard, return_headers=True)
+        except PrivateAddressError as exc:
+            # Name the class: a policy refusal is a different diagnosis from
+            # a transport failure, and the note is what an operator reads.
+            return 0, "", {}, f"{type(exc).__name__}: {exc}", True
         except FetchError as exc:
-            return 0, "", {"x-fetch-error": str(exc)}
+            return 0, "", {}, str(exc), False
+        except ValueError as exc:
+            if not str(exc).startswith("cannot resolve"):
+                raise
+            return 0, "", {}, f"{type(exc).__name__}: {exc}", False
         if len(result) == 3:
             status, html, headers = result
-            return status, html, headers or {}
+            return status, html, headers or {}, None, False
         status, html = result
-        return status, html, {}
+        return status, html, {}, None, False
 
-    def _alternate(self, host: str, tried_groups: set[str]):
+    def _pacing_key(self, host: str, proxy):
+        """R44: one pacing slot per (host, endpoint), never per group.
+
+        A real pool knows each endpoint's identity; a test double without
+        ``key``/``_key`` keeps the old per-group behaviour.
+        """
+        if self.pool is None:
+            return (host, None)
+        identify = getattr(self.pool, "key", None) \
+            or getattr(self.pool, "_key", None)
+        if identify is None:
+            return (host, _group_of(proxy))
+        return (host, identify(proxy))
+
+    def _alternate(self, host: str, tried_groups: set[str], reason: str):
         """One proxy from a group not tried yet for this page, else None.
 
-        Called once per network-level verdict (a 429, a plain 403) and only
-        ever to *move* the lease; returning None means the page keeps the
-        proxy it holds and follows the normal rule for that verdict (R33).
+        Called once per network-level verdict (a 429, a plain 403, a
+        transport error) and only ever to *move* the lease; returning None
+        means the page keeps the proxy it holds and follows the normal rule
+        for that verdict (R33). R46: a switch is logged, so a run that
+        rotates visibly says why.
         """
         if self.pool is None:
             return None
         alternate = getattr(self.pool, "alternate", None)
         if alternate is None:
             return None
-        return alternate(host, set(tried_groups))
+        switched = alternate(host, set(tried_groups))
+        if switched is not None and self.log:
+            print(f"[ladder] {host}: {reason}, trying another proxy group",
+                  file=self.log)
+        return switched
 
     def _report(self, proxy, host: str, verdict) -> None:
         """Hand the verdict to the pool, challenge included.

@@ -648,12 +648,15 @@ def build_server(workdir: Path, allow_private: bool = False, *, pool=None,
         extra = {"rows": [], "row_count": 0, "dataset_path": None, "pages": []}
         try:
             cfg, notes = _check_config(config)
-            min_rows, _ = _int_arg("min_rows", min_rows, 1, 1)
+            min_rows, min_notes = _int_arg("min_rows", min_rows, 1, 1)
             max_rows, more = _int_arg("max_rows", max_rows,
                                       DEFAULT_MAX_ROWS, 1, MAX_ROWS_CAP)
-            notes += more
+            notes += min_notes + more
 
-            call = {"guard": guard, "log": None}
+            # R41: the environment is not an input to an MCP server. Without
+            # --proxies there is no pool at all, whatever the operator's
+            # shell exports.
+            call = {"guard": guard, "log": None, "use_env": False}
             if pool is not None:
                 call["pool"] = pool
             result = scrape_impl(cfg, **call)

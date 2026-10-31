@@ -398,6 +398,14 @@ class ProxyPool:
         del self._cooling[(key, host)]
         return False
 
+    def key(self, proxy) -> tuple:
+        """One endpoint's stable identity, for pacing and cooldown (R44).
+
+        A gateway is one endpoint (its URL is built per lease); a list entry
+        is one URL. The value is only ever a dict key: it is never logged.
+        """
+        return self._key(proxy)
+
     def _key(self, proxy) -> tuple:
         """Cooldown identity: a gateway is one endpoint, a list entry one URL."""
         group = getattr(proxy, "group", None)

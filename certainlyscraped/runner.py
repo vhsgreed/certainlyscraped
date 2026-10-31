@@ -92,9 +92,10 @@ def _url_list(urls) -> list[str]:
 class RateGate:
     """One fetch start per ``interval`` seconds per key, thread-safe.
 
-    key is ``(host, proxy_group)`` so two proxies to the same host each get
-    their own slot. A slot is reserved under the lock and slept for outside
-    it, so threads never hold the gate while waiting.
+    key is ``(host, proxy identity)`` (R44), so two proxies to the same host
+    each get their own slot -- including two endpoints in one rotation group.
+    A slot is reserved under the lock and slept for outside it, so threads
+    never hold the gate while waiting.
     """
 
     def __init__(self, interval: float, clock=time.monotonic,
