@@ -1,6 +1,6 @@
 """certainlyscraped: config-driven tiered scraper."""
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
 from .api import ScrapeResult, load_config, scrape  # noqa: E402
 

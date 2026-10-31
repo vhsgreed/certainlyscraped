@@ -28,7 +28,16 @@ for _info in pkgutil.iter_modules(certainlyscraped.__path__):
     # scrapeforge` dies before our own __main__.py can run.
     if _info.name == "__main__":
         continue
-    _module = importlib.import_module(f"certainlyscraped.{_info.name}")
+    try:
+        _module = importlib.import_module(f"certainlyscraped.{_info.name}")
+    except ModuleNotFoundError as _e:
+        # A module that needs an optional extra (`mcp_server` needs
+        # `certainlyscraped[mcp]`) is skipped, as `import certainlyscraped`
+        # would never load it either. Anything missing from our own package
+        # is a real error and still raises.
+        if (_e.name or "").split(".")[0] in ("certainlyscraped", "scrapeforge"):
+            raise
+        continue
     sys.modules[f"{__name__}.{_info.name}"] = _module
     globals()[_info.name] = _module
 

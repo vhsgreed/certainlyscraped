@@ -50,3 +50,56 @@ def test_old_command_prints_notice(capsys):
     except SystemExit:
         pass
     assert "renamed to certainlyscraped" in capsys.readouterr().err
+
+
+def _without_mcp(code):
+    """Run `code` in a fresh interpreter where the optional `mcp` extra is absent."""
+    import subprocess, sys
+
+    prelude = (
+        "import sys\n"
+        "class _Block:\n"
+        "    def find_spec(self, name, path=None, target=None):\n"
+        "        if name == 'mcp' or name.startswith('mcp.'):\n"
+        "            raise ModuleNotFoundError(f\"No module named '{name}'\", name=name)\n"
+        "        return None\n"
+        "sys.meta_path.insert(0, _Block())\n"
+    )
+    return subprocess.run(
+        [sys.executable, "-c", prelude + code], capture_output=True, text=True
+    )
+
+
+def test_old_import_works_without_the_mcp_extra():
+    r = _without_mcp(
+        "import warnings; warnings.simplefilter('ignore')\n"
+        "import scrapeforge, certainlyscraped.fetch\n"
+        "assert scrapeforge.fetch is certainlyscraped.fetch\n"
+        "assert 'scrapeforge.mcp_server' not in sys.modules\n"
+        "print('ok')\n"
+    )
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "ok"
+
+
+def test_python_m_scrapeforge_runs_without_the_mcp_extra():
+    r = _without_mcp(
+        "import runpy; sys.argv = ['scrapeforge', '--help']\n"
+        "runpy.run_module('scrapeforge', run_name='__main__')\n"
+    )
+    assert r.returncode == 0, r.stderr
+    assert "renamed to certainlyscraped" in r.stderr
+
+
+def test_a_real_import_error_inside_the_package_still_raises():
+    # Only a missing *optional third-party* dependency is skipped; a broken
+    # certainlyscraped module must not be hidden by the shim.
+    r = _without_mcp(
+        "import certainlyscraped, types\n"
+        "sys.modules['certainlyscraped.fetch'] = None\n"
+        "try:\n"
+        "    import scrapeforge\n"
+        "except ImportError:\n"
+        "    print('raised')\n"
+    )
+    assert r.stdout.strip() == "raised", (r.stdout, r.stderr)

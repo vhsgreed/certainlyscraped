@@ -4,6 +4,18 @@ All notable changes to this project are documented here. Version 0.4.0 is the
 first release under the name `certainlyscraped`; earlier releases shipped as
 `scrapeforge`.
 
+## [0.4.1] - 2026-10-31
+
+### Fixed
+
+- `import scrapeforge` and `python -m scrapeforge` failed with
+  `ModuleNotFoundError: No module named 'mcp'` when the optional `[mcp]`
+  extra was not installed: the rename shim imported every submodule,
+  including the MCP server. It now skips a module whose optional dependency
+  is missing; a missing module of our own still raises. 0.4.0 was correct
+  with `certainlyscraped[mcp]` installed and for the `certainlyscraped` /
+  `cscrape` commands.
+
 ## [0.4.0] - 2026-10-31
 
 ### Release notes
