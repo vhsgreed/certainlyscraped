@@ -7,7 +7,7 @@ sys.path.insert(0, ".")
 
 import pytest
 
-from scrapeforge import fetch as fetch_mod
+from certainlyscraped import fetch as fetch_mod
 
 
 class _Resp:

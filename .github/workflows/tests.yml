@@ -17,5 +17,6 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: pip install -e ".[dev]"
-      - run: scrapeforge --help
+      - run: certainlyscraped --help
+      - run: cscrape --help
       - run: python -m pytest -q

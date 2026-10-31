@@ -5,8 +5,8 @@ sys.path.insert(0, ".")
 
 import httpx
 
-from scrapeforge import __version__
-from scrapeforge import classify, fetch as fetch_mod
+from certainlyscraped import __version__
+from certainlyscraped import classify, fetch as fetch_mod
 
 
 class _R:
@@ -27,8 +27,8 @@ def _capture(monkeypatch):
 def test_tier1_fetch_sends_honest_user_agent(monkeypatch):
     seen = _capture(monkeypatch)
     fetch_mod.fetch("https://example.test/", 1)
-    assert seen["ua"].startswith(f"scrapeforge/{__version__} ")
-    assert "github.com/vhsgreed/scrapeforge" in seen["ua"]
+    assert seen["ua"].startswith(f"certainlyscraped/{__version__} ")
+    assert "github.com/vhsgreed/certainlyscraped" in seen["ua"]
     assert "Mozilla" not in seen["ua"]
 
 

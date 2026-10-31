@@ -98,7 +98,7 @@ def cmd_verify(args):
 
 
 def main(argv=None):
-    p = argparse.ArgumentParser(prog="scrapeforge")
+    p = argparse.ArgumentParser(prog="certainlyscraped")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     p_probe = sub.add_parser("probe", help="classify a site's anti-bot tier")
@@ -126,7 +126,7 @@ def main(argv=None):
     p_try.set_defaults(func=assist.run_try)
 
     p_fetch = sub.add_parser(
-        "fetch", help="save a page's HTML (what scrapeforge sees) to a file")
+        "fetch", help="save a page's HTML (what certainlyscraped sees) to a file")
     assist.add_fetch_arguments(p_fetch)
     p_fetch.set_defaults(func=assist.run_fetch)
 

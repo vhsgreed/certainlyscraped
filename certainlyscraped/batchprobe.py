@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Batch probe: classify many sites in one pass.
 
-Usage: python3 -m scrapeforge batchprobe urls.txt --out results.csv
-       python3 -m scrapeforge batchprobe se.txt de.txt indie.txt
+Usage: python3 -m certainlyscraped batchprobe urls.txt --out results.csv
+       python3 -m certainlyscraped batchprobe se.txt de.txt indie.txt
 
 Design notes:
 - One HTTP attempt per site first (cheap). Escalate to TLS impersonation
@@ -122,7 +122,7 @@ def run(args: argparse.Namespace) -> list[dict]:
 
 
 def main(argv=None):
-    p = argparse.ArgumentParser(prog="scrapeforge batchprobe")
+    p = argparse.ArgumentParser(prog="certainlyscraped batchprobe")
     add_arguments(p)
     return run(p.parse_args(argv))
 

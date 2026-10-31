@@ -5,7 +5,7 @@ sys.path.insert(0, ".")
 
 import pytest
 
-from scrapeforge.extract import clean, extract_items
+from certainlyscraped.extract import clean, extract_items
 
 
 @pytest.mark.parametrize("raw,spec,want", [

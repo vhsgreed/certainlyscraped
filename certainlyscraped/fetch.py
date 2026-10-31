@@ -13,8 +13,8 @@ from . import __version__
 # Tier 1 says who it is. A Chrome UA on a client that does not connect like
 # Chrome is what bot filters flag (HN answers it with HTTP 419 on ?p=2), while
 # an honest UA gets through. Sites that need a browser identity get tier 2.
-USER_AGENT = (f"scrapeforge/{__version__} "
-              "(+https://github.com/vhsgreed/scrapeforge)")
+USER_AGENT = (f"certainlyscraped/{__version__} "
+              "(+https://github.com/vhsgreed/certainlyscraped)")
 
 
 def fetch(url: str, tier: int, timeout: int = 30, proxy: str | None = None,
@@ -22,7 +22,7 @@ def fetch(url: str, tier: int, timeout: int = 30, proxy: str | None = None,
     """Returns (status_code, html). Raises FetchError on hard failure.
 
     file:// URLs read a saved page from disk (any tier), so a config can be
-    developed against a page saved once with `scrapeforge fetch`."""
+    developed against a page saved once with `certainlyscraped fetch`."""
     if url.startswith("file://"):
         return _read_file(url)
     if tier == 1:

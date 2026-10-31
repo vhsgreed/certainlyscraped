@@ -9,8 +9,8 @@ sys.path.insert(0, ".")
 import pytest
 import yaml
 
-from scrapeforge import cli, scrape
-from scrapeforge.suggest import explain_matches, suggest
+from certainlyscraped import cli, scrape
+from certainlyscraped.suggest import explain_matches, suggest
 
 FIX = os.path.join(os.path.dirname(__file__), "fixtures")
 
@@ -21,7 +21,7 @@ def page(name):
 
 
 def rows_for(html, s):
-    from scrapeforge.extract import extract_page
+    from certainlyscraped.extract import extract_page
     return extract_page(html, {"items": s.items, "fields": s.fields})
 
 

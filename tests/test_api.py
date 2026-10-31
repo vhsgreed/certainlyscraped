@@ -9,8 +9,8 @@ sys.path.insert(0, ".")
 
 import pytest
 
-from scrapeforge import cli, scrape
-from scrapeforge.since import diff_rows
+from certainlyscraped import cli, scrape
+from certainlyscraped.since import diff_rows
 
 PAGE1 = """<html><body>
 <div class="p"><a href="/a">Alpha</a><span class="price">$10</span></div>

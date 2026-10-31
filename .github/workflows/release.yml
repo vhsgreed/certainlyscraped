@@ -3,10 +3,9 @@ name: release
 # Push a tag like v0.3.0 to test, build and check the package; the wheel
 # and sdist are kept as workflow artifacts.
 #
-# Publishing to PyPI is off until you opt in, because the name
-# `scrapeforge` is taken on PyPI by an unrelated project. To publish:
-#   1. set `name` in pyproject.toml to a free name (the command and
-#      `import scrapeforge` do not change);
+# Publishing to PyPI is off until you opt in. To publish:
+#   1. check that the name `certainlyscraped` is available on PyPI (the
+#      command and imports do not change if it is not);
 #   2. on pypi.org: Account -> Publishing -> add a pending trusted publisher
 #      for this repository, workflow `release.yml`, environment `pypi`;
 #   3. in GitHub: Settings -> Secrets and variables -> Actions -> Variables,
@@ -25,7 +24,7 @@ jobs:
           python-version: "3.12"
       - name: tag matches package version
         run: |
-          v=$(python -c "import re;print(re.search(r'__version__ = \"(.+?)\"', open('scrapeforge/__init__.py').read())[1])")
+          v=$(python -c "import re;print(re.search(r'__version__ = \"(.+?)\"', open('certainlyscraped/__init__.py').read())[1])")
           test "v$v" = "${GITHUB_REF_NAME}" || { echo "tag ${GITHUB_REF_NAME} != version $v"; exit 1; }
       - run: pip install build twine pytest && pip install -e .
       - run: python -m pytest -q

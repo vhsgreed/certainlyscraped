@@ -6,8 +6,8 @@ import sys
 
 sys.path.insert(0, ".")
 
-from scrapeforge.verify import (EXIT_EMPTY, EXIT_OK, read_records,
-                                verify_file, verify_records)
+from certainlyscraped.verify import (EXIT_EMPTY, EXIT_OK, read_records,
+                                     verify_file, verify_records)
 
 
 def test_verify_records_ok():

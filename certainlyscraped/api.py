@@ -1,12 +1,12 @@
-"""Python API: the same pipeline `scrapeforge run` uses, callable from code.
+"""Python API: the same pipeline `certainlyscraped run` uses, callable from code.
 
-    from scrapeforge import scrape
+    from certainlyscraped import scrape
     result = scrape("examples/hn-front.yaml")
     for row in result.rows:
         ...
 
 `config` is a path to a YAML file or an already-loaded dict with the same
-keys. Nothing is written to disk; use `scrapeforge.output.write` for that.
+keys. Nothing is written to disk; use `certainlyscraped.output.write` for that.
 """
 from __future__ import annotations
 

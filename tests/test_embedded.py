@@ -4,8 +4,8 @@ import sys
 
 sys.path.insert(0, ".")
 
-from scrapeforge.embedded import discover, get_path, items_from_json
-from scrapeforge.extract import extract_page
+from certainlyscraped.embedded import discover, get_path, items_from_json
+from certainlyscraped.extract import extract_page
 
 LD = {"@context": "https://schema.org", "@graph": [
     {"@type": "Product", "name": "Lamp", "offers": {"price": "19.90"}},

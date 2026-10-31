@@ -2,7 +2,7 @@
 import sys
 sys.path.insert(0, ".")
 
-from scrapeforge.classify import classify_response
+from certainlyscraped.classify import classify_response
 
 
 def test_static_page():

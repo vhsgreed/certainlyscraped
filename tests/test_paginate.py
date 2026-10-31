@@ -3,7 +3,7 @@ import sys
 
 sys.path.insert(0, ".")
 
-from scrapeforge.paginate import paginate
+from certainlyscraped.paginate import paginate
 
 
 def _site(pages: dict):

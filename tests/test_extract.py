@@ -3,7 +3,7 @@ import sys
 
 sys.path.insert(0, ".")
 
-from scrapeforge.extract import extract_items
+from certainlyscraped.extract import extract_items
 
 HTML = """
 <html><body>

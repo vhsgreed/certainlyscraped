@@ -409,7 +409,7 @@ def suggest(html: str, prefer_json: bool = False) -> Suggestion | None:
 
 def explain_matches(html: str, selector: str, attr: str = "text",
                     within: str | None = None, limit: int = 5) -> dict:
-    """What a selector matches, for `scrapeforge try`."""
+    """What a selector matches, for `certainlyscraped try`."""
     soup = BeautifulSoup(html, "html.parser")
     out = {"selector": selector, "within": within, "warnings": []}
     if re.search(r":nth-(?:child|of-type)\(\d+\)", selector) or selector.count(">") >= 4:
@@ -458,10 +458,11 @@ def _zero_match_hints(soup, html: str, selector: str) -> list[str]:
         hints.append(f"the page body has only {body_text} characters of text: "
                      "the content is probably rendered by JavaScript.")
     if discover(html):
-        hints.append("the page carries embedded JSON: run `scrapeforge probe` "
-                     "or `scrapeforge init --json` to read it without a browser.")
+        hints.append("the page carries embedded JSON: run `certainlyscraped probe` "
+                     "or `certainlyscraped init --json` to read it without a browser.")
     if not hints:
         hints.append("0 matches in the HTML the server sent. The browser's "
                      "DevTools show the page after JavaScript ran, which can "
-                     "differ: `scrapeforge fetch <url>` saves what scrapeforge sees.")
+                     "differ: `certainlyscraped fetch <url>` saves what "
+                     "certainlyscraped sees.")
     return hints

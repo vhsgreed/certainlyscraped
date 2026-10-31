@@ -36,7 +36,7 @@ jobs:
       - name: run ${{ matrix.config }}
         run: |
           set -o pipefail
-          scrapeforge run "${{ matrix.config }}" --out /tmp/out \
+          certainlyscraped run "${{ matrix.config }}" --out /tmp/out \
             --min-rows ${{ matrix.min_rows }} --sample 2 2>&1 | tee /tmp/log
       - name: summary
         if: always()
@@ -71,8 +71,8 @@ jobs:
         run: |
           set -o pipefail
           cd "$RUNNER_TEMP"
-          scrapeforge init "${{ matrix.url }}" --name site 2>&1 | tee init.log
-          scrapeforge run site.yaml --out out.csv --min-rows ${{ matrix.min_rows }} \
+          certainlyscraped init "${{ matrix.url }}" --name site 2>&1 | tee init.log
+          certainlyscraped run site.yaml --out out.csv --min-rows ${{ matrix.min_rows }} \
             --sample 2 2>&1 | tee run.log
       - name: summary
         if: always()

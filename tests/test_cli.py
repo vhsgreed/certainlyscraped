@@ -5,7 +5,7 @@ sys.path.insert(0, ".")
 
 import pytest
 
-from scrapeforge import batchprobe, cli, pageprobe
+from certainlyscraped import batchprobe, cli, pageprobe
 
 
 def _capture(monkeypatch, module):

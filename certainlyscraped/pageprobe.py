@@ -9,7 +9,7 @@ For each URL: fetch page 1, find a next-page link, fetch page 2, verify:
 Outputs a matrix CSV: PAGINATED_OK / NO_NEXT_LINK / BLOCKED_AT_DEPTH /
 NO_CONTENT_CHANGE / ERROR.
 
-Usage: python3 -m scrapeforge pageprobe urls.txt --out matrix.csv [--tiers tiers.csv]
+Usage: python3 -m certainlyscraped pageprobe urls.txt --out matrix.csv [--tiers tiers.csv]
 """
 from __future__ import annotations
 
@@ -192,7 +192,7 @@ def run(args: argparse.Namespace) -> list[dict]:
 
 
 def main(argv=None):
-    p = argparse.ArgumentParser(prog="scrapeforge pageprobe")
+    p = argparse.ArgumentParser(prog="certainlyscraped pageprobe")
     add_arguments(p)
     return run(p.parse_args(argv))
 
