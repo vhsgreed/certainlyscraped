@@ -44,8 +44,8 @@ from .suggest import explain_matches, suggest
 # What an agent may put in a config. Everything else is either a capability
 # the operator keeps (proxy, cookies, fetcher) or a path (since, snapshot).
 ALLOWED_CONFIG_KEYS = frozenset({
-    "url", "items", "fields", "json", "paginate", "max_pages",
-    "rate_limit_sec", "timeout", "tier", "output", "headers",
+    "url", "items", "fields", "paginate", "max_pages",
+    "rate_limit_sec", "timeout", "tier", "output",
     # Page sources (R17): the parallel runner's own shapes.
     "pages", "urls", "concurrency",
     # Escalation ladder and proxy pool knobs (R21).
@@ -630,9 +630,9 @@ def build_server(workdir: Path, allow_private: bool = False, *, pool=None,
         """Run an inline YAML/JSON scrape config and return rows plus a dataset.
 
         `config` is config TEXT (not a path). Allowed keys: url, pages,
-        urls, concurrency, items, fields, json, paginate, max_pages,
+        urls, concurrency, items, fields, paginate, max_pages,
         rate_limit_sec, timeout, tier, max_tier, max_retries, cooldown_sec,
-        per_proxy_rate_sec, output, headers. `proxy`/`proxies`/`cookies`/
+        per_proxy_rate_sec, output. `proxy`/`proxies`/`cookies`/
         `since`/`snapshot`/`fetcher` are refused; tiers are capped at 2.
         A config may use pages (a {n} template range) or urls (a list)
         instead of a top-level url. Per-call bounds (notes say when one

@@ -7,7 +7,7 @@ A config names its proxies in one of three shapes; all of them become one
 
     proxies:                               # a list, label after "#"
       - http://u:p@10.1.2.3:8000 # dc-a
-      - http://10.1.9.9:8000               # group "10.1/16"
+      - http://10.1.9.9:8000               # group "net-1" (a neutral name)
 
     proxies:                               # group -> urls, or a file, or a gateway
       dc-a: [http://u:p@10.1.2.3:8000]
@@ -287,8 +287,28 @@ class ProxyPool:
         entries, gateways = _read(raw, env, base_dir,
                                   allow_userinfo=allow_userinfo)
         groups: dict[str, list[str]] = {}
+        # R46: a group a user did not name gets a neutral label (net-1,
+        # net-2, ... in order of first appearance). The derived key -- a /16,
+        # a /48 or a hostname -- stays inside this function: it must never
+        # reach steps, proxy_group or a log line.
+        user_labels = {str(label) for _, label in entries if label}
+        neutral: dict[str, str] = {}
+
+        def neutral_label(url: str) -> str:
+            key = _derive_group(url)
+            label = neutral.get(key)
+            if label is None:
+                number = len(neutral) + 1
+                label = f"net-{number}"
+                while label in user_labels or label in groups:
+                    number += 1
+                    label = f"net-{number}"
+                neutral[key] = label
+            return label
+
         for url, label in entries:
-            group = label or default_group or _derive_group(url)
+            group = (label or default_group
+                     or neutral_label(url))
             groups.setdefault(group, []).append(url)
         built = [Gateway(spec, env) for spec in gateways]
         if not groups and not built:
@@ -570,7 +590,11 @@ def _file_entries(path, base_dir) -> list[tuple[str, str | None]]:
 
 
 def _derive_group(url: str) -> str:
-    """IPv4 /16, IPv6 /48, or the hostname itself."""
+    """The network key behind an unlabelled proxy: /16, /48, or its hostname.
+
+    This is an internal key, never a group label: ``from_config`` maps it to
+    a neutral ``net-N`` so no address reaches steps or ``proxy_group`` (R46).
+    """
     host = urlparse(url).hostname or url
     try:
         address = ipaddress.ip_address(host)
