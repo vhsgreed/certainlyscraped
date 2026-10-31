@@ -88,13 +88,20 @@ when that rung fails.
 
 | What came back | What happens next |
 |---|---|
-| rate limited (429, or 419 without a challenge) | try the page through another proxy group; if there is none, wait once (`Retry-After`, else `cooldown_sec`) and retry |
+| rate limited (429, or 419 without a challenge) | try the page through another proxy group; if there is none, wait once (`Retry-After`, else `cooldown_sec`) and retry. Prints `[ladder] <host>: rate limited, waiting <n>s` |
 | challenge page (Cloudflare, PerimeterX, DataDome markers) | keep the proxy, raise the tier by one, up to `max_tier` |
 | plain 403 | try another proxy group first; with none left, raise the tier |
-| 5xx or no response | retry once at the same tier, then raise it |
+| 5xx | keep the proxy, retry once at the same tier, then raise the tier |
+| no response (refused, DNS, TLS, reset) | with a pool, try another proxy group once; then, pool or not, retry once at the same tier, then raise the tier |
 
-Once a site escalates, later pages on that site start at the new level (`steps`
-in the page report show the climb, for example `["t1", "t1@dc-b", "t2"]`).
+Every group switch also prints `[ladder] <host>: <reason>, trying another proxy
+group`, so a rotation is visible while it happens.
+
+Once a site escalates on a challenge or a 403, later pages on that site start
+at the new level. A level reached only by an error climb is not remembered.
+`steps` in the page report shows the rungs and the leased group, for example
+`["t1@dc-a", "t1@dc-b", "t2@dc-b"]` (a 403 from one group, a challenge from the
+other, real HTML at tier 2).
 
 ### Tiers
 
@@ -105,7 +112,10 @@ in the page report show the climb, for example `["t1", "t1@dc-b", "t2"]`).
 | 3 | a browser stack (`scrapling`, `cloakbrowser` or `playwright`) | an optional, heavy extra; used only with `max_tier: 3` and never promised for a specific site |
 
 `tier: auto` probes first and picks the lowest tier that returns a real page.
-A tier is not a promise: it is where the ladder starts.
+With a proxy pool configured, `auto` skips the probe and starts at tier 1: a
+probe is a direct request, and with a pool no request may leave from the origin
+IP. The ladder climbs from there. A tier is not a promise: it is where the
+ladder starts.
 
 ## Outcomes and exit codes
 
@@ -123,13 +133,20 @@ response's `pages` field:
 [done] 2 pages: 1 ok, 1 blocked (HTTP 403 on /status/403)
 ```
 
+A page with no response has no HTTP status to quote, so it reads
+`[done] 1 page: 1 error (no response on /list)`.
+
 | Exit code | Meaning |
 |---|---|
 | 0 | complete: at least `--min-rows`, no incomplete page |
-| 1 | config, I/O or fetch error |
-| 2 | fewer than `--min-rows` rows (2 wins over 4) |
+| 1 | config, I/O or fetch error; with `--min-rows 0`, a run whose every page errored |
+| 2 | fewer than `--min-rows` rows (2 wins over 4); an all-error run at the default `--min-rows 1` has no rows, so it is 2 |
 | 3 | `probe --fail-blocked`: the target is walled |
 | 4 | incomplete: at least `--min-rows`, but one or more pages ended `blocked`, `rate_limited` or `error` after all retries |
+
+Exit 1 for a page-level failure is reachable only when `--min-rows 0` asks for
+no rows. At the default `--min-rows 1`, a run that lost every page to errors
+fails the row check first and exits 2.
 
 Exit 4 is narrow on purpose. A trailing `not_found` or `empty` page past the
 end of a range does not count, and neither does a page that succeeded on retry.
@@ -166,23 +183,32 @@ Four tools, each a thin call into the same API:
 | `try_selector(url, selector, within?)` | match count, sample values, hints |
 | `scrape(config, min_rows?, max_rows?)` | `status`, rows (up to `max_rows`, default 50), the true row count, a dataset path, and per-page outcomes |
 
-`config` is inline YAML or JSON text, never a path. `status` says what the run
+`config` is inline YAML or JSON text, never a path. Config keys `proxy`,
+`proxies`, `cookies`, `since`, `snapshot` and `fetcher` are refused, and so are
+unknown keys such as `json` and `headers` (embedded JSON goes under
+`items.json`). `status` says what the run
 got: `complete` (at least `min_rows` rows and no incomplete page), `incomplete`
 (enough rows, but a page ended blocked, rate-limited or errored),
 `too_few_rows` (fewer than `min_rows` rows), `blocked` (zero rows and every
 page was walled or rate-limited) and `error` (zero rows and every page
 errored). These are not the CLI's exit codes: a blocked-only `run` exits 2,
 exit 3 is only `probe --fail-blocked`, and exit 1 is a config, I/O or fetch
-exception. A bad request is still a status dict: a tool never raises into the
-JSON-RPC channel.
+exception (or, with `--min-rows 0`, an all-error run). A bad request is still a
+status dict: a tool never raises into the JSON-RPC channel.
 
 Private addresses are refused by default: loopback, RFC 1918, link-local
 (including `169.254.169.254`) and unique-local IPv6, checked after DNS
 resolution and on every redirect hop. `--allow-private` turns that off for
 local development. The CLI does not refuse private addresses; only the MCP
-server does. Proxies come only from the server's own `--proxies proxies.yaml`,
-never from a tool argument, and file reads and datasets stay inside the working
-directory.
+server does. A refusal is terminal for the page: one attempt, no retry, no
+climb, outcome `error` with the refusal in the note.
+
+Proxies come only from the server's own `--proxies proxies.yaml`, never from a
+tool argument, and the server never reads `CERTAINLYSCRAPED_PROXIES`. `probe`,
+`init` and `try_selector` lease one proxy from that pool for the call; if the
+pool has nothing free they return `blocked` with `no proxy available for
+<host>` and make no request. Without `--proxies` the server has no pool and
+fetches directly. File reads and datasets stay inside the working directory.
 
 ## Proxies
 
@@ -217,28 +243,40 @@ http://10.1.9.9:8000           # dc-b
 http://10.1.1.7:8000
 ```
 
-Groups are the label after `#`, else an IPv4 `/16` or IPv6 `/48` prefix.
+Groups are the label after `#`, else a neutral label `net-1`, `net-2`, ... in
+order of first appearance, one per IPv4 `/16`, IPv6 `/48` or hostname. A label
+never contains a proxy address or hostname.
 A proxy that is walled for one host is parked for that host for
 `cooldown_sec`; it is not removed from the pool. `session: rotate` generates a
-new token per request, `sticky` keeps one per host and worker.
+new token per lease: one per page, and a 403 or 429 that switches group leases
+again. `sticky` keeps one token per host and worker.
 
 Passwords never belong in the main config. Put them in a dedicated proxies
 file passed with `--proxies`, or in the environment through `password_env`.
 A password inside an inline `proxy:`/`proxies:` URL in the committed YAML is
 refused with a message naming both alternatives. Page outcomes and MCP
-responses carry the group label, never the proxy URL or password. A failing
-proxy appears in the page outcome (`error`, its note, and `proxy_group`) and in
-`[run] fetch error:` if the exception escapes; no log line quotes the address,
-so the group label and the error text are the diagnosis.
+responses carry the group label, never the proxy URL or password. A page that
+failed on a dead proxy keeps the transport error as its note, for example
+`ConnectionError: Failed to perform, curl: (7) Failed to connect to *** over
+proxy *** ...` (the proxy address is `***`); an unresolvable host reads
+`DNSError: ... Could not resolve host: no-such-host.invalid ...`. No log line
+quotes a proxy address, so the group label and the error text are the
+diagnosis. A private address refused by the MCP guard is terminal: one
+attempt, no retry, no climb.
 
 Precedence for `run`: `--no-proxy` > `--proxies FILE` >
 `CERTAINLYSCRAPED_PROXIES` > the config. `--no-proxy` ignores every configured
-proxy and fetches directly (MCP has no such flag; without `--proxies` it has no
-pool at all).
+proxy and fetches directly. MCP has no such flag, never reads
+`CERTAINLYSCRAPED_PROXIES`, and without `--proxies` has no pool at all.
 
-Speed comes from many hosts or a proxy pool, not from threads alone. With no
-pool, one host gets at most one request per `rate_limit_sec` no matter the
-`concurrency`, so a single-host `pages:` job is still paced by the site.
+Speed comes from many hosts or a proxy pool, not from threads alone. The ladder
+paces per (host, proxy) at `per_proxy_rate_sec` (it falls back to
+`rate_limit_sec`; default 1.0).
+With no pool, one host gets at most one request per interval no matter the
+`concurrency`, so a single-host `pages:` job is still paced by the site. With a
+pool, N proxies to one host give N slots: eight pages at 1.0 s on one host took
+7.1 s with one proxy and 1.1 s with four, in one derived `net-1` group or four
+labelled groups alike.
 
 ## Parallel pages
 
@@ -259,8 +297,9 @@ urls:
 ```
 
 Rows are emitted in page order regardless of which response arrived first.
-A `pages:` range stops early after two consecutive `not_found` or `empty`
-pages at the end of the range.
+A `pages:` range stops after any two consecutive `not_found` or `empty` pages,
+not only at the end of the range: a gap in the middle ends the run early. Those
+pages are not incomplete, so the run can still exit 0.
 
 ## More commands
 
@@ -292,7 +331,7 @@ check rather than a friendly empty CSV.
 
 ## The old name
 
-The `scrapeforge` command still works until 0.5.0 and prints a deprecation
+The `scrapeforge` command still works until 0.5.0 and prints one deprecation
 notice on stderr; `import scrapeforge` also works and raises a
 `DeprecationWarning`, which Python shows when the import runs in `__main__`
 (the usual script case) and hides inside imported modules. New code should use

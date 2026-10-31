@@ -8,8 +8,8 @@
   "command": "certainlyscraped run <config.yaml> [--out <dataset>|-] [--min-rows N] [--sample N] [--since PREV] [--key FIELD]... [--snapshot PATH] [--report PATH] [--accept-partial] [--proxies PATH | --no-proxy]",
   "exit_codes": {
     "0": "complete: at least min-rows records and no incomplete page (--accept-partial maps 4 to 0)",
-    "1": "config, I/O or fetch error",
-    "2": "fewer than min-rows records scraped (an empty result fails loudly); 2 wins over 4",
+    "1": "config, I/O or fetch error; with --min-rows 0, a run whose every page errored",
+    "2": "fewer than min-rows records scraped (an empty result fails loudly); 2 wins over 4. An all-error run at the default --min-rows 1 has no records, so it is 2, not 1",
     "3": "probe --fail-blocked: the target is walled",
     "4": "incomplete: at least min-rows records, but one or more pages ended blocked, rate_limited or error after all retries"
   },
@@ -57,11 +57,16 @@
     "[saved] <path> (<n> rows)   (on stderr instead when --out -)"
   ],
   "stderr": [
-    "[probe] <url> -> tier <t> (<note>)   (tier: auto only)",
+    "[probe] <url> -> tier <t> (<note>)   (tier: auto only; skipped when a proxy pool is configured)",
     "[ladder] <url>: t<tier> -> t<tier+1> (<challenge|blocked|error>)",
+    "[ladder] <host>: rate limited, waiting <n>s",
+    "[ladder] <host>: <rate limited|blocked|error>, trying another proxy group",
     "[pages] range <from>..<to> capped at 100 pages (<from>..<capped>)",
+    "[paginate] stopped: HTTP <status> on <url>",
     "[done] <pages> pages: <n> ok, <n> empty, <n> not_found, <n> blocked, <n> rate_limited, <n> error (HTTP <status> on <path>)",
+    "[done] ... (no response on <path>)   (the first incomplete page had status 0)",
     "[rows] <n> unique items",
+    "[since] <path> not found: every row is new",
     "[since] <n> new, <n> changed, <n> unchanged vs <PREV>",
     "[snapshot] <path> (<n> rows)",
     "[verify] <path>: <n> row(s), minimum <min>",
@@ -124,7 +129,7 @@
             "type": "string",
             "pattern": "^t[123](@.+)?$"
           },
-          "description": "each rung tried, in order, with the proxy group when one was leased, e.g. [\"t1\", \"t1@dc-b\", \"t2\"]"
+          "description": "each rung tried, in order, with the leased proxy group when a pool is configured, e.g. [\"t1@dc-a\", \"t1@dc-b\", \"t2@dc-b\"]. With a pool every step has @group; with no pool none does"
         },
         "proxy_group": {
           "type": [
@@ -139,7 +144,7 @@
         },
         "note": {
           "type": "string",
-          "description": "why the page ended this way, e.g. 'challenge page: cloudflare' or 'max_tier 2 reached'"
+          "description": "why the page ended this way, e.g. 'challenge page: cloudflare' or 'max_tier 2 reached'. A page with status 0 keeps the last transport error text instead (scrubbed), e.g. 'ConnectionError: ... over proxy ***' or 'DNSError: ... Could not resolve host ...'"
         }
       }
     },
@@ -183,7 +188,7 @@
             "string",
             "null"
           ],
-          "description": "full JSONL dataset under <workdir>/.certainlyscraped/; null when the request was refused before a run (bad config, guard refusal, exception), not when individual pages errored: those still produce a dataset"
+          "description": "full JSONL dataset under <workdir>/.certainlyscraped/; null when the request was refused before a run (bad config, a guard refusal during the tier: auto probe, an exception), not when individual pages errored: those still produce a dataset (an explicit tier refuses at fetch time and the page outcome carries the error)"
         },
         "pages": {
           "type": "array",

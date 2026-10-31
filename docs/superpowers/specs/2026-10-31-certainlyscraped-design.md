@@ -49,14 +49,21 @@ back blocked:
    raise the tier by one, up to `max_tier`.
 4. **On `blocked`** without markers (plain 403): try a different proxy group first if
    any remain, then raise the tier.
-5. **Sticky:** once a site escalates, later pages on that site start at the new level.
-   No re-probing per page.
+5. **Sticky:** once a site escalates on a challenge or a 403, later pages on that site
+   start at the new level. No re-probing per page. A level reached only by an error
+   climb (a 5xx or no response) is not remembered.
 6. `max_tier` defaults to 2. Tier 3 is used only if `max_tier: 3` and the tier3 extra is
    installed; otherwise the page ends `blocked` with a note saying tier 3 was not
    available.
 7. Every escalation step is one attempt, counted against `max_retries` (default 3).
+8. **On a status-0 error (no response):** with a pool, try one other proxy group once
+   (the proxy is the likely fault), then retry the same tier once, then climb. A 5xx
+   is a response and keeps the lease. A `PrivateAddressError` from the guard is
+   terminal: one attempt, no retry, no climb.
 
-Each page outcome (section 7) records the steps taken, e.g. `["t1", "t1@dc-b", "t2"]`.
+Each page outcome (section 7) records the steps taken and the leased group, e.g.
+`["t1@dc-a", "t1@dc-b", "t2@dc-b"]` (a 403 from one group, a challenge from the other,
+real HTML at tier 2). With a pool every step carries `@group`; with no pool none does.
 
 ## 5. Proxy pool
 
@@ -80,31 +87,38 @@ proxies:
 
 ### Behaviour (`proxypool.py`)
 
-- `acquire(host) -> Proxy | None`: picks a proxy not cooling down for `host` and whose
-  per-host pace allows a request now; blocks until one is free or returns None when
-  every proxy is cooling down for that host.
+- `acquire(host) -> Proxy | None`: picks a proxy not cooling down for `host`; returns
+  None immediately when every group is cooling down for that host. It does not block:
+  pacing is the ladder's rate gate, not the pool's.
 - `report(proxy, host, outcome)`: `ok` resets; `rate_limited`, `error` and a `blocked`
   **without** challenge markers put that proxy in cooldown for that host only. A
   challenge parks nothing: the proxy reached the site, so the site is the problem.
 - `alternate(host, exclude_groups) -> Proxy | None`: a proxy from a group not yet tried
   for this page.
 - **Groups:** gateway proxies form one group per gateway; list proxies use their label,
-  else their /16 (IPv4) or /48 (IPv6) prefix; hostnames without a label are their own group.
-- `session: rotate` generates a new random session token per request; `sticky` keeps one
-  per (host, worker).
+  else a neutral `net-1`, `net-2`, ... assigned in order of first appearance, one per
+  /16 (IPv4), /48 (IPv6) or hostname. The derived network or hostname is an internal
+  key only: no address or hostname reaches `steps` or `proxy_group`.
+- `session: rotate` generates a new random session token per lease (one per page; a
+  403/429 group switch leases again); `sticky` keeps one per (host, worker).
 - **Never without a proxy (R27, corrected by R33):** when a pool is configured, a page is
   fetched through a proxy or not at all. If `acquire` returns None at the start of the
   page (every group is cooling for that host), the page stops with outcome `blocked` and
   the note `no proxy available for <host>`; a verdict already reached is kept. There is
   no fallback to the origin IP.
-- **One proxy per page (R33):** a page *leases* the proxy `acquire` gave it for its whole
-  life. A network-level verdict (a 429, or a 403 without challenge markers) tries
-  `alternate` once and moves the lease to the new group if one is free; with none left the
-  page keeps the proxy it holds and follows the normal rule (back off once and retry, or
-  climb the tier). A challenge, a 5xx/status-0 error and every climb keep the current
-  proxy: the tier is what is changing, not the endpoint. A park earned by this page still
-  applies to the *next* page on that host, never to the page that is already running —
-  otherwise the first wall would end the ladder.
+- **`tier: auto` under a pool (R40):** `auto` does not probe when a pool is configured
+  (a probe is a direct fetch). The ladder starts at tier 1 and climbs, so the first
+  request already leaves through a proxy. Without a pool the probe is unchanged.
+- **One proxy per page (R33, amended by R45):** a page *leases* the proxy `acquire` gave
+  it for its whole life. A network-level verdict (a 429, or a 403 without challenge
+  markers) tries `alternate` once and moves the lease to the new group if one is free;
+  with none left the page keeps the proxy it holds and follows the normal rule (back off
+  once and retry, or climb the tier). A challenge, a 5xx and every climb keep the current
+  proxy: the tier is what is changing, not the endpoint. A status-0 error (no response)
+  is different: it tries `alternate` once before the same-tier retry, and a tier reached
+  only by an error climb is not remembered. A park earned by this page still applies to
+  the *next* page on that host, never to the page that is already running; otherwise the
+  first wall would end the ladder.
 - **Secrets:** passwords only from environment variables named in the config, or from a
   dedicated proxies file (`--proxies`, `CERTAINLYSCRAPED_PROXIES`). Every log line, page
   outcome and MCP response shows the group label, never the URL, host or password --
@@ -123,19 +137,23 @@ proxies:
 ```yaml
 pages: { template: "https://news.ycombinator.com/news?p={n}", from: 1, to: 10 }
 # or
-urls: urls.txt
+urls: ["https://example.com/a", "https://example.com/b"]
 concurrency: 4               # default 1 = today's behaviour
 ```
 
 - `paginate:` (next-link) stays sequential; `pages:` and `urls:` run on a
   `ThreadPoolExecutor` with `concurrency` workers.
-- `rate_limit_sec` applies per (host, proxy). With no pool, one host gets at most one
-  request per interval no matter the concurrency. The docs say so plainly: speed comes
-  from many hosts or a proxy pool, not from threads alone.
+- `rate_limit_sec` (default 1.0; the ladder's `per_proxy_rate_sec` when set) applies per
+  (host, proxy), so N proxies to one host give N slots. With no pool, one host gets at
+  most one request per interval no matter the concurrency. Measured: eight pages at
+  1.0 s on one host took 7.1 s with one proxy and 1.1 s with four, whether the four were
+  one derived `net-1` group or four labelled groups. The docs say so plainly: speed
+  comes from many hosts or a proxy pool, not from threads alone.
 - Rows are emitted in page order regardless of completion order, so dedupe and output
   are deterministic.
-- A `pages:` range stops early after 2 consecutive `not_found` or `empty` pages at the
-  end of the range; those are not incomplete (section 7).
+- A `pages:` range stops early after any 2 consecutive `not_found` or `empty` pages,
+  not only at the end of the range: a gap in the middle ends the run early. Those pages
+  are not incomplete (section 7), so the run can still exit 0.
 
 ## 7. Page outcomes and exit codes
 
@@ -155,15 +173,16 @@ One record per page:
 
 - Outcomes come from `classify_response` only, so "blocked" means one thing everywhere.
 - `--report report.jsonl` writes the records; `ScrapeResult.page_report` returns them.
-- Summary line: `[done] 10 pages: 9 ok, 1 blocked (HTTP 419 on /news?p=2)`.
+- Summary line: `[done] 10 pages: 9 ok, 1 blocked (HTTP 419 on /news?p=2)`, or
+  `(no response on <path>)` when the first incomplete page never got a response.
 
 ### Exit codes
 
 | Code | Meaning |
 |---|---|
 | 0 | complete: at least `--min-rows`, no incomplete page |
-| 1 | config, I/O or fetch error |
-| 2 | fewer than `--min-rows` rows |
+| 1 | config, I/O or fetch error; with `--min-rows 0`, a run whose every page errored |
+| 2 | fewer than `--min-rows` rows (an all-error run at the default `--min-rows 1`) |
 | 3 | `probe --fail-blocked`: target is walled |
 | 4 | **incomplete**: at least `--min-rows`, but one or more pages ended `blocked`, `rate_limited` or `error` after all retries |
 
@@ -189,13 +208,20 @@ One record per page:
 
 - `status` is one of `complete`, `incomplete`, `too_few_rows`, `blocked`, `error`, with
   the same meaning as exit codes 0, 4, 2, 3, 1.
-- `config` accepts inline YAML or a path inside the working directory.
+- `config` is inline YAML or JSON text; a path is refused. `proxy`, `proxies`,
+  `cookies`, `since`, `snapshot` and `fetcher` are refused, and so are unknown keys:
+  `json` and `headers` are not config keys (`items.json` is where embedded JSON goes),
+  and an agent sending one gets a status dict, not a silent no-op.
 - **Private addresses refused by default:** loopback, RFC 1918, link-local (incl.
   169.254.169.254), and unique-local IPv6, checked after DNS resolution and on every
-  redirect hop. `--allow-private` turns it off. File reads and the dataset path are
-  confined to the working directory.
-- Proxies come only from the server's own config (`--proxies proxies.yaml`), never from
-  tool arguments.
+  redirect hop. `--allow-private` turns it off. A refusal is terminal for the page: one
+  attempt, no retry, no climb, outcome `error` with the refusal in the note. File reads
+  and the dataset path are confined to the working directory.
+- Proxies come only from the server's own `--proxies proxies.yaml`, never from a tool
+  argument and never from `CERTAINLYSCRAPED_PROXIES`. `probe`, `init` and `try_selector`
+  lease one proxy from that pool per call; if none is free they return `blocked` with
+  the note `no proxy available for <host>` and make no request. Without `--proxies` the
+  server has no pool and fetches directly.
 - The CLI does not refuse private addresses (a human scraping their own localhost is
   normal); only the MCP server does.
 
