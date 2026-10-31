@@ -235,6 +235,11 @@ Each step is shippable on its own; stars are checked against the target after st
   profile and the tool never stores or types credentials; opt-in per run; low fixed rate;
   only what that account can already see; README states the account-ban and terms-of-
   service risk plainly. Section 2's "no logins" holds for tiers 1-3 and the MCP server.
+  Karl's direction (2026-10-31): the novelty is not "includes a browser" but a library of
+  per-site collection scripts in the repo that users contribute to, wired into the
+  escalation ladder as its top rung with the ban warning. Scope: about 3 popular sites.
+  Auth: a logged-in session, or username + password supplied by the user. Open question
+  for that spec: storing/typing passwords vs session-only (the constraint above).
 
 ## 14. Decisions confirmed
 
