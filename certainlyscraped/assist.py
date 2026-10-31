@@ -9,16 +9,26 @@ import sys
 from urllib.parse import urlparse
 
 from .extract import extract_page
-from .fetch import fetch, to_url
+from .fetch import FetchError, fetch, to_url
+from .netguard import PrivateAddressError
 from .suggest import explain_matches, suggest
 
 EXIT_NOTHING = 2
 
 
-def load_page(target: str, tier: str = "auto", log=sys.stderr) -> tuple[str, str, int]:
-    """(url, html, tier) for a URL or a saved file. Exits 1 on fetch failure."""
+def load_page(target: str, tier: str = "auto", log=sys.stderr,
+              guard=None) -> tuple[str, str, int]:
+    """(url, html, tier) for a URL or a saved file. Exits 1 on fetch failure.
+
+    guard: optional netguard.check_url-style callable, applied to the probe
+    and every fetch hop. Under a guard a file:// target is refused here; the
+    caller (e.g. the MCP server) decides which files inside its workdir are
+    readable. A PrivateAddressError propagates instead of becoming a CLI
+    exit, so a policy refusal stays catchable."""
     url = to_url(target)
     if url.startswith("file://"):
+        if guard is not None:
+            raise FetchError("file:// not allowed under the guard")
         status, html = fetch(url, 1)
         if status != 200:
             print(f"[fetch] {target}: file not found", file=log)
@@ -26,7 +36,7 @@ def load_page(target: str, tier: str = "auto", log=sys.stderr) -> tuple[str, str
         return url, html, 1
     if tier == "auto":
         from .classify import probe
-        res = probe(url)
+        res = probe(url, guard=guard)
         t = res.tier
         print(f"[probe] {url} -> tier {t} ({res.note})", file=log)
         if t >= 3:
@@ -35,7 +45,9 @@ def load_page(target: str, tier: str = "auto", log=sys.stderr) -> tuple[str, str
     else:
         t = int(tier)
     try:
-        status, html = fetch(url, t)
+        status, html = fetch(url, t, guard=guard)
+    except PrivateAddressError:
+        raise
     except Exception as e:  # noqa: BLE001 - network errors end the command cleanly
         print(f"[fetch] {url}: {type(e).__name__}: {e}", file=log)
         sys.exit(1)

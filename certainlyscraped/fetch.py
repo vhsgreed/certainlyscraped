@@ -17,16 +17,38 @@ USER_AGENT = (f"certainlyscraped/{__version__} "
               "(+https://github.com/vhsgreed/certainlyscraped)")
 
 
+MAX_REDIRECTS = 10
+_REDIRECT_CODES = frozenset({301, 302, 303, 307, 308})
+
+
 def fetch(url: str, tier: int, timeout: int = 30, proxy: str | None = None,
-          cookies: dict | None = None) -> tuple[int, str]:
+          cookies: dict | None = None, *, guard=None,
+          transport=None) -> tuple[int, str]:
     """Returns (status_code, html). Raises FetchError on hard failure.
 
     file:// URLs read a saved page from disk (any tier), so a config can be
-    developed against a page saved once with `certainlyscraped fetch`."""
+    developed against a page saved once with `certainlyscraped fetch`.
+
+    guard: callable(url) -> None, e.g. netguard.check_url. When set, tiers 1
+    and 2 follow redirects by hand and call the guard before every request,
+    so a public URL cannot bounce the fetcher into an internal address. Tier
+    3 (a browser) cannot be policed per-hop and is disabled; file:// is left
+    to the caller, which reads workdir files itself.
+    transport: test-only httpx transport (httpx.MockTransport).
+    """
     if url.startswith("file://"):
+        if guard is not None:
+            raise FetchError("file:// not allowed under the guard")
         return _read_file(url)
+    if guard is not None:
+        if tier not in (1, 2):
+            raise FetchError("tier 3 disabled under the MCP guard")
+        if tier == 1:
+            return _fetch_httpx_guarded(url, timeout, proxy, cookies, guard,
+                                        transport)
+        return _fetch_curl_cffi_guarded(url, timeout, proxy, cookies, guard)
     if tier == 1:
-        return _fetch_httpx(url, timeout, proxy, cookies)
+        return _fetch_httpx(url, timeout, proxy, cookies, transport)
     if tier == 2:
         return _fetch_curl_cffi(url, timeout, proxy, cookies)
     return _fetch_browser(url, timeout, proxy, cookies)
@@ -34,6 +56,12 @@ def fetch(url: str, tier: int, timeout: int = 30, proxy: str | None = None,
 
 class FetchError(RuntimeError):
     pass
+
+
+def _redirect_location(status: int, headers) -> str | None:
+    if status not in _REDIRECT_CODES:
+        return None
+    return headers.get("Location") or headers.get("location") or None
 
 
 def _read_file(url: str) -> tuple[int, str]:
@@ -55,8 +83,26 @@ def to_url(target: str) -> str:
     return target
 
 
-def _fetch_httpx(url, timeout, proxy, cookies) -> tuple[int, str]:
+def _client_kwargs(timeout, proxy, cookies, transport,
+                   follow_redirects) -> dict:
+    kwargs = dict(timeout=timeout, follow_redirects=follow_redirects,
+                  headers={"User-Agent": USER_AGENT})
+    if proxy:
+        kwargs["proxy"] = proxy
+    if cookies:
+        kwargs["cookies"] = cookies
+    if transport is not None:
+        kwargs["transport"] = transport
+    return kwargs
+
+
+def _fetch_httpx(url, timeout, proxy, cookies, transport=None) -> tuple[int, str]:
     import httpx
+    if transport is not None:
+        with httpx.Client(**_client_kwargs(timeout, proxy, cookies, transport,
+                                           follow_redirects=True)) as client:
+            r = client.get(url)
+        return r.status_code, r.text
     kwargs = dict(timeout=timeout, follow_redirects=True,
                   headers={"User-Agent": USER_AGENT})
     if proxy:
@@ -65,6 +111,56 @@ def _fetch_httpx(url, timeout, proxy, cookies) -> tuple[int, str]:
         kwargs["cookies"] = cookies
     r = httpx.get(url, **kwargs)
     return r.status_code, r.text
+
+
+def _fetch_httpx_guarded(url, timeout, proxy, cookies, guard, transport):
+    """Tier 1 with redirects followed one hop at a time, guard first."""
+    import httpx
+    from urllib.parse import urljoin
+
+    with httpx.Client(**_client_kwargs(timeout, proxy, cookies, transport,
+                                       follow_redirects=False)) as client:
+        return _guarded_get(client.get, url, guard, urljoin,
+                            lambda r: (r.status_code, r.text, r.headers))
+
+
+def _fetch_curl_cffi_guarded(url, timeout, proxy, cookies, guard):
+    """Tier 2 with the same hand-rolled redirect loop as tier 1."""
+    from urllib.parse import urljoin
+
+    try:
+        from curl_cffi import requests as cr
+    except ImportError as e:
+        raise FetchError("tier 2 needs curl_cffi: pip install curl_cffi") from e
+    kwargs = dict(impersonate="chrome", timeout=timeout, allow_redirects=False)
+    if proxy:
+        kwargs["proxy"] = proxy
+    if cookies:
+        kwargs["cookies"] = cookies
+
+    def get(u):
+        return cr.get(u, **kwargs)
+
+    return _guarded_get(get, url, guard, urljoin,
+                        lambda r: (r.status_code, r.text, r.headers))
+
+
+def _guarded_get(get, url, guard, urljoin, unpack):
+    """One guarded request per hop, never more than MAX_REDIRECTS hops."""
+    current = url
+    redirects = 0
+    while True:
+        # Check the exact URL about to be requested, not just the first one.
+        guard(current)
+        r = get(current)
+        status, text, headers = unpack(r)
+        location = _redirect_location(status, headers)
+        if location is None:
+            return status, text
+        if redirects >= MAX_REDIRECTS:
+            raise FetchError("too many redirects")
+        redirects += 1
+        current = urljoin(current, location)
 
 
 def _fetch_curl_cffi(url, timeout, proxy, cookies) -> tuple[int, str]:

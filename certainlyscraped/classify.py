@@ -89,9 +89,13 @@ def classify_response(url: str, status: int, text: str) -> ProbeResult:
     return ProbeResult(url, status, size, 1, True, markers, note)
 
 
-def probe(url: str, timeout: int = 25) -> ProbeResult:
-    """Fetch once and classify. Tries plain first, then TLS impersonation."""
-    res = _probe(url, timeout)
+def probe(url: str, timeout: int = 25, guard=None) -> ProbeResult:
+    """Fetch once and classify. Tries plain first, then TLS impersonation.
+
+    guard: callable(url) -> None applied to every hop of both attempts (see
+    fetch.fetch). A PrivateAddressError from it propagates; it is not turned
+    into a ProbeResult."""
+    res = _probe(url, timeout, guard=guard)
     body = getattr(res, "_body", "")
     if body:
         from .embedded import discover
@@ -102,7 +106,9 @@ def probe(url: str, timeout: int = 25) -> ProbeResult:
     return res
 
 
-def _probe(url: str, timeout: int) -> ProbeResult:
+def _probe(url: str, timeout: int, guard=None) -> ProbeResult:
+    if guard is not None:
+        return _probe_guarded(url, timeout, guard)
     try:
         import httpx
         from .fetch import USER_AGENT
@@ -132,4 +138,43 @@ def _probe(url: str, timeout: int) -> ProbeResult:
         return ProbeResult(url, 0, 0, 3, False, [],
                            f"tls fetch failed: {e}")
 
+    return res
+
+
+def _probe_guarded(url: str, timeout: int, guard) -> ProbeResult:
+    """Same two attempts, routed through fetch.fetch so every hop is guarded.
+
+    A PrivateAddressError is a policy refusal, not a fetch problem: it must
+    reach the caller instead of being flattened into a ProbeResult note."""
+    from .fetch import fetch
+    from .netguard import PrivateAddressError
+
+    try:
+        status, text = fetch(url, 1, timeout=timeout, guard=guard)
+    except PrivateAddressError:
+        raise
+    except Exception as e:  # noqa: BLE001 - mirrors the unguarded path
+        res = ProbeResult(url, 0, 0, 2, False, [], f"httpx failed: {e}")
+    else:
+        res = classify_response(url, status, text)
+        res._body = text
+        if res.tier <= 1:
+            return res
+
+    try:
+        status, text = fetch(url, 2, timeout=timeout, guard=guard)
+    except PrivateAddressError:
+        raise
+    except Exception as e:  # noqa: BLE001
+        return ProbeResult(url, 0, 0, 3, False, [], f"tls fetch failed: {e}")
+    res2 = classify_response(url, status, text)
+    # The response only arrived via TLS impersonation, so tier 2 is the
+    # honest floor even if the page looks like a plain static page.
+    if res2.tier < 2:
+        res2 = ProbeResult(res2.url, res2.status, res2.body_size, 2,
+                           res2.confident, res2.markers,
+                           "served via TLS impersonation (curl_cffi)")
+    res2._body = text
+    if res2.tier < res.tier or res2.confident:
+        return res2
     return res

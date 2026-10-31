@@ -51,14 +51,14 @@ def load_config(config: str | dict) -> dict:
     return cfg
 
 
-def resolve_tier(cfg: dict, log=None) -> int:
+def resolve_tier(cfg: dict, log=None, guard=None) -> int:
     tier = cfg.get("tier", "auto")
     if tier != "auto":
         return int(tier)
     if str(cfg["url"]).startswith("file://"):
         return 1
     from .classify import probe
-    res = probe(cfg["url"])
+    res = probe(cfg["url"], guard=guard)
     if log:
         print(f"[probe] {cfg['url']} -> tier {res.tier} ({res.note})", file=log)
     return res.tier
@@ -76,21 +76,27 @@ def as_page_fetcher(fetcher: Callable[[str], tuple[int, str]],
 
 
 def scrape(config: str | dict, *, tier: int | None = None,
-           fetcher: Fetcher | None = None, log=sys.stderr) -> ScrapeResult:
+           fetcher: Fetcher | None = None, log=sys.stderr,
+           guard=None) -> ScrapeResult:
     """Fetch every page the config paginates over and extract its items.
 
     tier: override the config's tier (skips the probe).
     fetcher: callable url -> (status, html); replaces the tiered fetcher,
              which is how tests and custom transports plug in.
     log: stream for progress lines, or None for silence.
+    guard: callable(url) -> None (e.g. netguard.check_url) applied by the
+           built-in fetcher to the probe and to every fetch hop. It is NOT
+           applied to a caller-supplied `fetcher`; that fetcher owns its own
+           network policy.
     """
     cfg = load_config(config)
     if tier is None:
-        tier = 1 if fetcher else resolve_tier(cfg, log)
+        tier = 1 if fetcher else resolve_tier(cfg, log, guard=guard)
     if fetcher is None:
         def fetcher(u):
             return _fetch(u, tier, timeout=cfg.get("timeout", 30),
-                          proxy=cfg.get("proxy"), cookies=cfg.get("cookies"))
+                          proxy=cfg.get("proxy"), cookies=cfg.get("cookies"),
+                          guard=guard)
 
     rows: list[dict] = []
     seen: set[str] = set()
