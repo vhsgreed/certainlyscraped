@@ -12,6 +12,7 @@ from certainlyscraped.outcome import (  # noqa: E402
     PageOutcome,
     Verdict,
     classify_fetch,
+    outcome_for,
     scrape_status,
     summary_line,
 )
@@ -134,6 +135,45 @@ def test_summary_line_counts_in_fixed_order():
         "[done] 4 pages: 1 ok, 1 empty, 1 not_found, 1 error "
         "(HTTP 500 on /c)"
     )
+
+
+def test_outcome_for_copies_fetch_details():
+    fetched = PageFetch(200, "<html></html>", attempts=2, steps=["t1", "t2"],
+                        proxy_group="dc-a", elapsed_ms=42)
+    verdict = classify_fetch("https://x/1", 200, "<html></html>")
+    out = outcome_for("https://x/1", fetched, verdict, rows=3)
+    assert (out.url, out.outcome, out.status) == ("https://x/1", "ok", 200)
+    assert out.rows == 3
+    assert (out.attempts, out.steps, out.proxy_group, out.elapsed_ms) == \
+        (2, ["t1", "t2"], "dc-a", 42)
+    assert out.note == verdict.note
+    assert out.steps is not fetched.steps  # copied, not shared
+
+
+def test_outcome_for_zero_rows_on_ok_is_empty():
+    fetched = PageFetch(200, "<html></html>")
+    verdict = classify_fetch("https://x/1", 200, "<html></html>")
+    assert outcome_for("https://x/1", fetched, verdict, rows=0).outcome == "empty"
+
+
+def test_outcome_for_does_not_empty_a_failed_page():
+    fetched = PageFetch(404, "")
+    verdict = classify_fetch("https://x/1", 404, "")
+    out = outcome_for("https://x/1", fetched, verdict)
+    assert (out.outcome, out.rows) == ("not_found", 0)
+
+
+def test_outcome_for_without_a_fetch_is_a_status_zero_error():
+    out = outcome_for("https://x/1", None, Verdict("error", "FetchError: boom"))
+    assert (out.status, out.attempts, out.steps, out.rows) == (0, 1, [], 0)
+    assert out.note == "FetchError: boom"
+
+
+def test_outcome_for_note_override_wins():
+    fetched = PageFetch(429, "slow")
+    verdict = classify_fetch("https://x/1", 429, "slow")
+    out = outcome_for("https://x/1", fetched, verdict, note="rewritten")
+    assert out.note == "rewritten"
 
 
 def test_page_fetch_defaults():

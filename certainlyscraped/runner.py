@@ -14,7 +14,8 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from urllib.parse import urlparse
 
-from .outcome import PageFetch, PageOutcome, classify_fetch
+from .outcome import (PageFetch, PageOutcome, Verdict, classify_fetch,
+                      outcome_for)
 
 # Same ceiling as follow_links' max_pages: a template range is still a pager.
 RANGE_CAP = 100
@@ -149,14 +150,15 @@ def run_parallel(fetch_page, urls: list[str], cfg: dict, on_page,
     next_index = 0
     trailing = 0
 
-    def task(url: str) -> PageFetch:
-        gate.wait((_host(url), None))
-        return fetch_page(url)
-
     def fill() -> None:
         nonlocal next_index
         while next_index < len(urls) and len(pending) < workers:
-            pending[next_index] = executor.submit(task, urls[next_index])
+            url = urls[next_index]
+            # Take the slot on the calling thread, before submitting: a pool
+            # worker that slept here would be joined as non-daemon at exit,
+            # so Ctrl-C would hang for the rest of the gate interval.
+            gate.wait((_host(url), None))
+            pending[next_index] = executor.submit(fetch_page, url)
             next_index += 1
 
     def abort() -> None:
@@ -176,8 +178,7 @@ def run_parallel(fetch_page, urls: list[str], cfg: dict, on_page,
                 detail = f"{type(exc).__name__}: {exc}"
                 if log:
                     print(f"[parallel] {url}: {detail}", file=log)
-                outcome = PageOutcome(url=url, outcome="error", status=0,
-                                      note=detail)
+                outcome = outcome_for(url, None, Verdict("error", detail))
             else:
                 outcome = _consume(url, fetched, on_page)
             outcomes.append(outcome)
@@ -199,15 +200,7 @@ def run_parallel(fetch_page, urls: list[str], cfg: dict, on_page,
 
 def _consume(url: str, fetched: PageFetch, on_page) -> PageOutcome:
     verdict = classify_fetch(url, fetched.status, fetched.html)
-    outcome = PageOutcome(
-        url=url, outcome=verdict.outcome, status=fetched.status,
-        attempts=fetched.attempts, steps=list(fetched.steps),
-        proxy_group=fetched.proxy_group, elapsed_ms=fetched.elapsed_ms,
-        note=verdict.note)
     if fetched.status >= 400 or fetched.status == 0:
-        return outcome
+        return outcome_for(url, fetched, verdict)
     rows = on_page(fetched.html, url) or 0
-    outcome.rows = rows
-    if outcome.outcome == "ok" and rows == 0:
-        outcome.outcome = "empty"
-    return outcome
+    return outcome_for(url, fetched, verdict, rows=rows)

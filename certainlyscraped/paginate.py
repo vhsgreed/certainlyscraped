@@ -10,7 +10,7 @@ from __future__ import annotations
 import time
 from urllib.parse import urljoin
 
-from .outcome import PageFetch, PageOutcome, classify_fetch
+from .outcome import PageFetch, PageOutcome, classify_fetch, outcome_for
 
 
 def follow_links(fetch_page, base_url: str, cfg: dict, on_page,
@@ -36,24 +36,16 @@ def follow_links(fetch_page, base_url: str, cfg: dict, on_page,
     while url and pages < max_pages:
         fetched = fetch_page(url)
         verdict = classify_fetch(url, fetched.status, fetched.html)
-        outcome = PageOutcome(
-            url=url, outcome=verdict.outcome, status=fetched.status,
-            attempts=fetched.attempts, steps=list(fetched.steps),
-            proxy_group=fetched.proxy_group, elapsed_ms=fetched.elapsed_ms,
-            note=verdict.note)
         if fetched.status >= 400:
             # Recorded, then stop: the rest of the pagination is unreachable.
-            outcomes.append(outcome)
+            outcomes.append(outcome_for(url, fetched, verdict))
             if log:
                 print(f"[paginate] stopped: HTTP {fetched.status} on {url}",
                       file=log)
             break
         pages += 1
         rows = on_page(fetched.html, url) or 0
-        outcome.rows = rows
-        if outcome.outcome == "ok" and rows == 0:
-            outcome.outcome = "empty"
-        outcomes.append(outcome)
+        outcomes.append(outcome_for(url, fetched, verdict, rows=rows))
 
         if not pag:
             break

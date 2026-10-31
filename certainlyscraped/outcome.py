@@ -101,6 +101,32 @@ def classify_fetch(url: str, status: int, html: str) -> Verdict:
     return Verdict("ok", probe.note)
 
 
+def outcome_for(url: str, fetched: PageFetch | None, verdict: Verdict,
+                rows: int | None = None,
+                note: str | None = None) -> PageOutcome:
+    """Build the per-page record; the one place ``PageOutcome`` gets filled.
+
+    Every runner goes through here so a new field only has to be wired once.
+    ``fetched`` carries attempts/steps/proxy_group/elapsed_ms (pass ``None``
+    when no page came back, e.g. the fetch raised). ``rows`` is the count the
+    page handler measured; leave it ``None`` for a page that was not parsed.
+    An ``ok`` page with zero rows becomes ``empty``. ``note`` overrides the
+    verdict's note.
+    """
+    if fetched is None:
+        fetched = PageFetch(status=0, html="")
+    outcome = PageOutcome(
+        url=url, outcome=verdict.outcome, status=fetched.status,
+        attempts=fetched.attempts, steps=list(fetched.steps),
+        proxy_group=fetched.proxy_group, elapsed_ms=fetched.elapsed_ms,
+        note=verdict.note if note is None else note)
+    if rows is not None:
+        outcome.rows = rows
+        if outcome.outcome == "ok" and rows == 0:
+            outcome.outcome = "empty"
+    return outcome
+
+
 def scrape_status(n_rows: int, outcomes: list[PageOutcome], min_rows: int) -> str:
     """Aggregate a run: complete | incomplete | too_few_rows | blocked | error."""
     if outcomes and n_rows == 0:

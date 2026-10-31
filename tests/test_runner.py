@@ -2,7 +2,10 @@
 
 Run: python3 -m pytest tests/ -q
 """
+import os
 import random
+import signal
+import subprocess
 import sys
 import time
 
@@ -86,6 +89,78 @@ def test_rate_gate_per_host():
     gate2.wait(("h", "b"))
     assert fc2.clock() == 0
     assert fc2.sleeps == []
+
+
+def test_run_parallel_paces_fetch_starts():
+    """The gate is wired into the run: 4 starts, one per 0.1 s interval."""
+    urls = [f"https://shop.test/p{i}" for i in range(1, 5)]
+    pages = {u: (200, u) for u in urls}
+    starts = []
+
+    def fetch_page(url):
+        starts.append(time.monotonic())
+        return PageFetch(status=200, html=url)
+
+    outcomes = run_parallel(fetch_page, urls,
+                            {"rate_limit_sec": 0.1, "concurrency": 4},
+                            lambda html, url: 1)
+
+    assert [o.url for o in outcomes] == urls
+    assert len(starts) == 4
+    gaps = [b - a for a, b in zip(starts, starts[1:])]
+    assert all(gap >= 0.09 for gap in gaps), gaps
+    assert starts[-1] - starts[0] >= 0.28, starts
+
+
+# Ctrl-C has to leave the process promptly even while the gate is pacing: the
+# gate must be waited on by the calling thread, not by non-daemon pool workers
+# (which the interpreter joins at exit). A real subprocess and a real SIGINT
+# are the only way to catch the exit delay; in-process tests cannot.
+CTRL_C_SCRIPT = """
+import sys
+from certainlyscraped.outcome import PageFetch
+from certainlyscraped.runner import run_parallel
+
+
+def fetch_page(url):
+    return PageFetch(status=200, html="<html><body>ok</body></html>")
+
+
+def on_page(html, url):
+    return 1
+
+
+urls = ["https://shop.test/news?p=%d" % n for n in range(1, 13)]
+print("READY", flush=True)
+run_parallel(fetch_page, urls, {"concurrency": 4, "rate_limit_sec": 1.0},
+             on_page)
+print("FINISHED", flush=True)
+"""
+
+
+def test_ctrl_c_exits_promptly_while_gate_waits():
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    proc = subprocess.Popen([sys.executable, "-c", CTRL_C_SCRIPT], cwd=root,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True)
+    try:
+        assert proc.stdout.readline().strip() == "READY"
+        time.sleep(0.3)  # now inside the calling thread's gate wait
+        started = time.monotonic()
+        proc.send_signal(signal.SIGINT)
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            raise AssertionError("process ignored SIGINT for over 10 s")
+        elapsed = time.monotonic() - started
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+    assert proc.returncode != 0, "SIGINT should stop the run, not finish it"
+    assert elapsed < 1.5, f"exit took {elapsed:.2f}s after SIGINT (want <1.5s)"
 
 
 def test_rate_gate_disabled_intervals_do_not_sleep():
