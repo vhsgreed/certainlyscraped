@@ -132,7 +132,7 @@ One record per page:
 
 - Outcomes come from `classify_response` only, so "blocked" means one thing everywhere.
 - `--report report.jsonl` writes the records; `ScrapeResult.page_report` returns them.
-- Summary line: `[done] 10 pages: 9 ok, 1 blocked (HTTP 419 on ?p=2)`.
+- Summary line: `[done] 10 pages: 9 ok, 1 blocked (HTTP 419 on /news?p=2)`.
 
 ### Exit codes
 

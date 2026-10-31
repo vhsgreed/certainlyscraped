@@ -113,7 +113,7 @@ and change `tests/test_user_agent.py` to expect `certainlyscraped/{__version__} 
   - `test_status_blocked`: 0 rows, `[blocked]` -> `blocked`.
   - `test_status_error`: 0 rows, `[error]` -> `error`.
   - `test_empty_not_incomplete`: 30 rows, `[ok, empty, empty]` -> `complete`.
-  - `test_summary_line`: `[ok]*9 + [blocked 419 ?p=2]` -> `"[done] 10 pages: 9 ok, 1 blocked (HTTP 419 on ?p=2)"` (path+query of the first incomplete page).
+  - `test_summary_line`: `[ok]*9 + [blocked 419 ?p=2]` -> `"[done] 10 pages: 9 ok, 1 blocked (HTTP 419 on /news?p=2)"` (path+query of the first incomplete page).
 - [ ] **Step 2:** run `tests/test_outcome.py` -> FAIL (module missing).
 - [ ] **Step 3:** implement in `outcome.py`, delegating marker detection to `classify.classify_response`; status rules evaluated in this order: all outcomes `blocked`/`rate_limited` and 0 rows -> `blocked`; all `error` and 0 rows -> `error`; rows < min_rows -> `too_few_rows`; any in `INCOMPLETE` -> `incomplete`; else `complete`.
 - [ ] **Step 4:** full suite passes.
