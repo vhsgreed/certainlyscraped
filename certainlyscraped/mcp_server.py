@@ -464,6 +464,16 @@ def build_server(workdir: Path, allow_private: bool = False, *, pool=None,
     def guard(url: str) -> None:
         check_url(url, allow_private=allow_private)
 
+    def lease(url: str):
+        """(proxy, host) from the server's own pool, or (None, host).
+
+        R40: when the operator gave the server a pool, every request —
+        including the probe and the page load behind init/try_selector —
+        leaves through a leased proxy. No lease means no request at all.
+        """
+        host = urlsplit(url).hostname or ""
+        return pool.acquire(host), host
+
     server = MCPServer(name="certainlyscraped", version=__version__)
 
     @server.tool()
@@ -479,7 +489,16 @@ def build_server(workdir: Path, allow_private: bool = False, *, pool=None,
         """
         try:
             target = _check_target(url)
-            res = probe_impl(target, guard=guard)
+            if pool is not None:
+                proxy, host = lease(target)
+                if proxy is None:
+                    note = f"no proxy available for {host}"
+                    return {"status": "blocked", "tier": None, "note": note,
+                            "body_size": 0, "markers": [],
+                            "private_refused": False, "embedded": []}
+                res = probe_impl(target, guard=guard, proxy=proxy)
+            else:
+                res = probe_impl(target, guard=guard)
         except PrivateAddressError as e:
             return _probe_error(f"refused: {e}", private_refused=True)
         except _ConfigError as e:
@@ -512,8 +531,17 @@ def build_server(workdir: Path, allow_private: bool = False, *, pool=None,
         """
         try:
             target = _check_target(url)
-            target, html, tier = load_impl(target, tier="auto", log=None,
-                                           guard=guard)
+            if pool is not None:
+                proxy, host = lease(target)
+                if proxy is None:
+                    return {"status": "blocked", "config": "", "items": {},
+                            "fields": {}, "rows_preview": [],
+                            "note": f"no proxy available for {host}"}
+                target, html, tier = load_impl(target, tier="auto", log=None,
+                                               guard=guard, proxy=proxy)
+            else:
+                target, html, tier = load_impl(target, tier="auto", log=None,
+                                               guard=guard)
             s = suggest(html)
             if s is None:
                 return {"status": "error", "config": "", "items": {},
@@ -561,8 +589,21 @@ def build_server(workdir: Path, allow_private: bool = False, *, pool=None,
             target = _check_target(url)
             if not isinstance(selector, str) or not selector.strip():
                 raise _ConfigError("selector must be a non-empty string")
-            target, html, _ = load_impl(target, tier="auto", log=None,
-                                        guard=guard)
+            if within is not None and not isinstance(within, str):
+                raise _ConfigError(
+                    "within must be a string (an items selector), got "
+                    f"{type(within).__name__}")
+            if pool is not None:
+                proxy, host = lease(target)
+                if proxy is None:
+                    note = f"no proxy available for {host}"
+                    return {"status": "blocked", "note": note, **empty,
+                            "hints": [note]}
+                target, html, _ = load_impl(target, tier="auto", log=None,
+                                            guard=guard, proxy=proxy)
+            else:
+                target, html, _ = load_impl(target, tier="auto", log=None,
+                                            guard=guard)
             res = explain_matches(html, selector, "text",
                                   (within or None), 20)
         except PrivateAddressError as e:

@@ -17,7 +17,7 @@ EXIT_NOTHING = 2
 
 
 def load_page(target: str, tier: str = "auto", log=sys.stderr,
-              guard=None) -> tuple[str, str, int]:
+              guard=None, proxy=None) -> tuple[str, str, int]:
     """(url, html, tier) for a URL or a saved file. Exits 1 on fetch failure.
 
     guard: optional netguard.check_url-style callable, applied to the probe
@@ -28,7 +28,9 @@ def load_page(target: str, tier: str = "auto", log=sys.stderr,
     propagates instead of becoming a CLI exit: a SystemExit inside a stdio
     MCP server would kill the server. Every diagnostic print is behind
     `if log:`, because log=None must write nothing at all -- stdout is the
-    JSON-RPC channel there."""
+    JSON-RPC channel there.
+    proxy: a proxy URL or ``proxypool.Proxy`` used by both the probe and the
+    fetch (R40: the MCP server leases one so nothing leaves from the origin)."""
     url = to_url(target)
     if url.startswith("file://"):
         if guard is not None:
@@ -41,7 +43,7 @@ def load_page(target: str, tier: str = "auto", log=sys.stderr,
         return url, html, 1
     if tier == "auto":
         from .classify import probe
-        res = probe(url, guard=guard)
+        res = probe(url, guard=guard, proxy=proxy)
         t = res.tier
         if log:
             print(f"[probe] {url} -> tier {t} ({res.note})", file=log)
@@ -51,7 +53,7 @@ def load_page(target: str, tier: str = "auto", log=sys.stderr,
     else:
         t = int(tier)
     try:
-        status, html = fetch(url, t, guard=guard)
+        status, html = fetch(url, t, guard=guard, proxy=proxy)
     except PrivateAddressError:
         raise
     except Exception as e:  # noqa: BLE001 - network errors end the command cleanly

@@ -89,13 +89,15 @@ def classify_response(url: str, status: int, text: str) -> ProbeResult:
     return ProbeResult(url, status, size, 1, True, markers, note)
 
 
-def probe(url: str, timeout: int = 25, guard=None) -> ProbeResult:
+def probe(url: str, timeout: int = 25, guard=None, proxy=None) -> ProbeResult:
     """Fetch once and classify. Tries plain first, then TLS impersonation.
 
     guard: callable(url) -> None applied to every hop of both attempts (see
     fetch.fetch). A PrivateAddressError from it propagates; it is not turned
-    into a ProbeResult."""
-    res = _probe(url, timeout, guard=guard)
+    into a ProbeResult.
+    proxy: a proxy URL or ``proxypool.Proxy``; R40 requires one whenever a
+    pool is configured, so a probe never leaves from the origin IP."""
+    res = _probe(url, timeout, guard=guard, proxy=proxy)
     body = getattr(res, "_body", "")
     if body:
         from .embedded import discover
@@ -106,14 +108,17 @@ def probe(url: str, timeout: int = 25, guard=None) -> ProbeResult:
     return res
 
 
-def _probe(url: str, timeout: int, guard=None) -> ProbeResult:
+def _probe(url: str, timeout: int, guard=None, proxy=None) -> ProbeResult:
+    from .fetch import proxy_url
+    proxy = proxy_url(proxy)
     if guard is not None:
-        return _probe_guarded(url, timeout, guard)
+        return _probe_guarded(url, timeout, guard, proxy=proxy)
     try:
         import httpx
         from .fetch import USER_AGENT
         r = httpx.get(url, timeout=timeout, follow_redirects=True,
-                      headers={"User-Agent": USER_AGENT})
+                      headers={"User-Agent": USER_AGENT},
+                      **({"proxy": proxy} if proxy else {}))
         res = classify_response(url, r.status_code, r.text)
         res._body = r.text
         if res.tier <= 1:
@@ -123,7 +128,8 @@ def _probe(url: str, timeout: int, guard=None) -> ProbeResult:
 
     try:
         from curl_cffi import requests as cr
-        r = cr.get(url, impersonate="chrome", timeout=timeout)
+        r = cr.get(url, impersonate="chrome", timeout=timeout,
+                   **({"proxy": proxy} if proxy else {}))
         res2 = classify_response(url, r.status_code, r.text)
         # The response only arrived via TLS impersonation, so tier 2 is the
         # honest floor even if the page looks like a plain static page.
@@ -141,7 +147,7 @@ def _probe(url: str, timeout: int, guard=None) -> ProbeResult:
     return res
 
 
-def _probe_guarded(url: str, timeout: int, guard) -> ProbeResult:
+def _probe_guarded(url: str, timeout: int, guard, proxy=None) -> ProbeResult:
     """Same two attempts, routed through fetch.fetch so every hop is guarded.
 
     A PrivateAddressError is a policy refusal, not a fetch problem: it must
@@ -150,7 +156,8 @@ def _probe_guarded(url: str, timeout: int, guard) -> ProbeResult:
     from .netguard import PrivateAddressError
 
     try:
-        status, text = fetch(url, 1, timeout=timeout, guard=guard)
+        status, text = fetch(url, 1, timeout=timeout, guard=guard,
+                             proxy=proxy)
     except PrivateAddressError:
         raise
     except Exception as e:  # noqa: BLE001 - mirrors the unguarded path
@@ -162,7 +169,8 @@ def _probe_guarded(url: str, timeout: int, guard) -> ProbeResult:
             return res
 
     try:
-        status, text = fetch(url, 2, timeout=timeout, guard=guard)
+        status, text = fetch(url, 2, timeout=timeout, guard=guard,
+                             proxy=proxy)
     except PrivateAddressError:
         raise
     except Exception as e:  # noqa: BLE001

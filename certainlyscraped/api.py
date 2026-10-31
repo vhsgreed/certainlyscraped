@@ -64,11 +64,16 @@ def load_config(config: str | dict) -> dict:
     return cfg
 
 
-def resolve_tier(cfg: dict, log=None, guard=None) -> int:
+def resolve_tier(cfg: dict, log=None, guard=None, pool=None) -> int:
     tier = cfg.get("tier", "auto")
     if tier != "auto":
         return int(tier)
     if str(cfg["url"]).startswith("file://"):
+        return 1
+    if pool is not None:
+        # R40: with a pool nothing may fetch from the origin IP. A probe is a
+        # direct fetch, so `auto` starts at tier 1 and the ladder climbs; it
+        # may spend one extra t1 attempt per host and never leaks the IP.
         return 1
     from .classify import probe
     res = probe(cfg["url"], guard=guard)
@@ -176,7 +181,8 @@ def scrape(config: str | dict, *, tier: int | None = None,
         # for the tier probe and for logging.
         cfg = dict(cfg, url=urls[0])
     if tier is None:
-        tier = 1 if fetcher else resolve_tier(cfg, log, guard=guard)
+        tier = 1 if fetcher else resolve_tier(cfg, log, guard=guard,
+                                              pool=pool)
     ladder = None
     cancel = None
     if fetcher is None:
