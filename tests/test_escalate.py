@@ -237,8 +237,9 @@ class FakePool:
                 return proxy
         return None
 
-    def report(self, proxy, host, outcome):
-        self.reports.append((getattr(proxy, "group", None), host, outcome))
+    def report(self, proxy, host, outcome, *, challenge=False):
+        self.reports.append((getattr(proxy, "group", None), host, outcome,
+                             challenge))
 
 
 def test_each_attempt_waits_on_the_gate_with_host_and_group():
@@ -607,19 +608,20 @@ def test_pool_switches_group_on_rate_limit():
 
 
 def test_pool_tries_other_group_before_climbing_tier():
-    # R27 changes what the climb can do: both groups are parked for this
-    # host by the two 403s, and the ladder will not reuse a parked proxy or
-    # go out with none, so the page stops blocked at tier 1.
+    # R33: the page leases one proxy at a time. A plain 403 buys one other
+    # group; with none left the tier climbs on the proxy the page already
+    # holds (the parked one is not abandoned, and no fetch goes out bare).
     pool, _ = pool_for(["http://a:1 # a", "http://b:1 # b"])
     ladder, fetch_fn, _ = make(
         [(403, FORBIDDEN), (403, FORBIDDEN), (200, OK)], pool=pool)
     page = ladder.fetch_page("https://h.test/1")
-    assert page.steps == ["t1@a", "t1@b"]
-    assert [c["tier"] for c in fetch_fn.calls] == [1, 1]
+    assert page.steps == ["t1@a", "t1@b", "t2@b"]
+    assert [c["tier"] for c in fetch_fn.calls] == [1, 1, 2]
+    assert [c["proxy"] for c in fetch_fn.calls] == [
+        "http://a:1", "http://b:1", "http://b:1"]
+    assert all(c["proxy"] is not None for c in fetch_fn.calls)
     assert page.proxy_group == "b"
-    assert page.status == 403
-    assert page.outcome is None  # classified from the 403, which says blocked
-    assert classify_fetch("https://h.test/1", 403, FORBIDDEN).outcome == "blocked"
+    assert page.status == 200
 
 
 def test_pool_cooldown_keeps_a_blocked_proxy_off_that_host():
@@ -661,15 +663,74 @@ def test_a_page_whose_pool_is_cooling_never_fetches_from_the_origin(monkeypatch)
     assert second.status == 0 and second.attempts == 0
 
 
-def test_a_cooling_pool_keeps_an_earlier_verdict():
-    """R27: a rate limit already seen is the page's outcome, not 'blocked'."""
+def test_a_pool_429_backs_off_once_then_retries_the_same_proxy():
+    """R33 (b): the parked proxy keeps its lease: one 300 s wait, one retry.
+
+    R27's version pinned a single call -- the ladder asked the pool again,
+    got None and broke out, so a 429 paid the full backoff and gave up.
+    """
     pool, _ = pool_for(["http://a:1 # a"])
-    ladder, fetch_fn, _ = make([(429, "")], pool=pool)
+    ladder, fetch_fn, clock = make([(429, "")], pool=pool)
     page = ladder.fetch_page("https://h.test/1")
-    assert len(fetch_fn.calls) == 1
+    assert len(fetch_fn.calls) == 2
+    assert clock.sleeps == [300]
+    assert [c["proxy"] for c in fetch_fn.calls] == ["http://a:1"] * 2
+    assert page.steps == ["t1@a", "t1@a"]
     assert page.status == 429
     assert classify_fetch("https://h.test/1", page.status, page.html).outcome \
         == "rate_limited"
+    # ... while the park still applies to the NEXT page on this host.
+    assert pool.acquire("h.test") is None
+
+
+def test_a_challenge_with_a_pool_climbs_on_the_same_proxy():
+    """R33 (a): a challenge is about the tier, not the proxy."""
+    pool, _ = pool_for(["http://a:1 # a"])
+    ladder, fetch_fn, _ = make([(403, CHALLENGE), (200, OK)], pool=pool)
+    page = ladder.fetch_page("https://h.test/1")
+    assert page.steps == ["t1@a", "t2@a"]
+    assert [c["tier"] for c in fetch_fn.calls] == [1, 2]
+    assert [c["proxy"] for c in fetch_fn.calls] == ["http://a:1"] * 2
+    assert page.status == 200
+
+
+def test_a_page_whose_pool_is_cooling_for_the_host_stops_without_a_fetch():
+    """R33 (c): no lease, no page -- and no request from the origin IP."""
+    pool, _ = pool_for(["http://a:1 # a", "http://b:1 # b"])
+    pool.report("http://a:1", "h.test", "blocked")
+    pool.report("http://b:1", "h.test", "blocked")
+    ladder, fetch_fn, _ = make([(200, OK)], pool=pool)
+    page = ladder.fetch_page("https://h.test/1")
+    assert fetch_fn.calls == []
+    assert page.attempts == 0 and page.steps == []
+    assert page.outcome == "blocked"
+    assert page.note == "no proxy available for h.test"
+
+
+def test_a_park_from_one_page_steers_the_next_page_to_another_proxy():
+    """R33 (d): the lease ends with the page; the park outlives it."""
+    pool, _ = pool_for(["http://a:1 # a", "http://b:1 # b"])
+    ladder, fetch_fn, _ = make(
+        [(403, FORBIDDEN), (200, OK), (200, OK)], pool=pool)
+    first = ladder.fetch_page("https://h.test/1")
+    second = ladder.fetch_page("https://h.test/2")
+    assert first.steps == ["t1@a", "t1@b"]
+    assert first.proxy_group == "b"
+    assert second.steps == ["t1@b"]
+    assert second.proxy_group == "b"
+    assert fetch_fn.calls[-1]["proxy"] == "http://b:1"
+
+
+def test_a_challenge_does_not_park_the_proxy_for_the_next_page():
+    """R34: the proxy worked (a challenge is the site); it stays available."""
+    pool, _ = pool_for(["http://a:1 # a"])
+    ladder, _, _ = make([(403, CHALLENGE), (200, OK), (200, OK)], pool=pool)
+    first = ladder.fetch_page("https://h.test/1")
+    second = ladder.fetch_page("https://h.test/2")
+    assert first.steps == ["t1@a", "t2@a"]
+    # sticky tier 2 for the host, and still proxy "a": nothing was parked
+    assert second.steps == ["t2@a"]
+    assert second.proxy_group == "a"
 
 
 def test_no_secret_anywhere(tmp_path, monkeypatch):

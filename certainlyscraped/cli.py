@@ -73,38 +73,49 @@ def cmd_probe(args):
 
 
 def _run_config(args):
-    """(config, use_env, proxies_from_file) for `run`.
+    """(config, use_env, proxies_from_file, proxy_source) for `run`.
 
     A config path is returned untouched when no proxy flag is given, so every
-    other run keeps loading the file exactly once. ``--no-proxy`` is
-    absolute: it strips the config's proxies *and* makes scrape() ignore
-    CERTAINLYSCRAPED_PROXIES.
+    other run keeps loading the file exactly once.
+
+    Proxy precedence (R35): ``--no-proxy`` > ``--proxies FILE`` >
+    ``CERTAINLYSCRAPED_PROXIES`` > the config. ``--no-proxy`` strips the
+    config's proxies *and* makes scrape() ignore the environment; the
+    explicit file is the whole set and outranks the environment too.
     """
     if not getattr(args, "proxies", None) \
             and not getattr(args, "no_proxy", False):
-        return args.config, True, False
+        return args.config, True, False, "auto"
     cfg = load_config(args.config)
     if getattr(args, "proxies", None):
         # The file is the whole proxy set: it replaces the config's, and a
         # password in it is allowed (a proxies file is not the committed one).
         cfg = {key: value for key, value in cfg.items() if key != "proxy"}
         cfg["proxies"] = read_proxies_file(args.proxies)
-        return cfg, True, True
+        return cfg, False, True, "flag"
     cfg = {key: value for key, value in cfg.items()
            if key not in ("proxy", "proxies")}
-    return cfg, False, False
+    return cfg, False, False, "auto"
 
 
-def _redact_exc(exc: BaseException, cfg, *, allow_userinfo: bool = False) -> str:
-    """`Type: message` with any proxy credential or address removed."""
+def _redact_exc(exc: BaseException, cfg, *, allow_userinfo: bool = False,
+                base_dir: str = ".") -> str:
+    """`Type: message` with any proxy credential or address removed.
+
+    ``base_dir`` is the config file's directory: a relative
+    ``proxies: {list: proxies.txt}`` only resolves there, and a pool that
+    could not be built masks nothing but the userinfo.
+    """
     detail = f"{type(exc).__name__}: {exc}"
     if isinstance(cfg, str):
+        base_dir = str(Path(cfg).resolve().parent)
         try:
             cfg = load_config(cfg)
         except Exception:  # noqa: BLE001 - the original error is the news
             cfg = None
     try:
-        pool = (ProxyPool.from_config(cfg, allow_userinfo=allow_userinfo)
+        pool = (ProxyPool.from_config(cfg, base_dir=base_dir,
+                                      allow_userinfo=allow_userinfo)
                 if isinstance(cfg, dict) else None)
     except Exception:  # noqa: BLE001 - a bad proxies config must not hide it
         pool = None
@@ -121,7 +132,7 @@ def cmd_run(args):
     if getattr(args, "proxies", None):
         base_dir = str(Path(args.proxies).resolve().parent)
     try:
-        cfg, use_env, from_file = _run_config(args)
+        cfg, use_env, from_file, proxy_source = _run_config(args)
         kwargs = {}
         if isinstance(cfg, dict):
             kwargs["base_dir"] = base_dir
@@ -129,18 +140,20 @@ def cmd_run(args):
             kwargs["use_env"] = False
         if from_file:
             kwargs["proxies_from_file"] = True
+        if proxy_source != "auto":
+            kwargs["proxy_source"] = proxy_source
         result = scrape(cfg, log=sys.stderr, **kwargs)
     except (OSError, ValueError, KeyError, yaml.YAMLError) as e:
         # A YAML parse error quotes the offending line, which may hold a
         # proxy URL: same redaction as a fetch failure.
-        print(f"[run] config error: "
-              f"{_redact_exc(e, cfg, allow_userinfo=from_file)}",
-              file=sys.stderr)
+        detail = _redact_exc(e, cfg, allow_userinfo=from_file,
+                             base_dir=base_dir)
+        print(f"[run] config error: {detail}", file=sys.stderr)
         sys.exit(EXIT_ERROR)
     except Exception as e:  # noqa: BLE001 - network/TLS errors from any tier
-        print(f"[run] fetch error: "
-              f"{_redact_exc(e, cfg, allow_userinfo=from_file)}",
-              file=sys.stderr)
+        detail = _redact_exc(e, cfg, allow_userinfo=from_file,
+                             base_dir=base_dir)
+        print(f"[run] fetch error: {detail}", file=sys.stderr)
         sys.exit(EXIT_ERROR)
     cfg, rows = result.config, result.rows
 

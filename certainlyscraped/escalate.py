@@ -40,10 +40,6 @@ CANCEL_SLICE_SEC = 0.25
 # later by the runner, from the row count -- the ladder never sees it.)
 _TERMINAL = frozenset({"ok", "not_found"})
 
-# A proxy has not been chosen for the next attempt (distinct from "no proxy").
-_UNSET = object()
-
-
 def _host(url: str) -> str:
     return urlparse(url).hostname or ""
 
@@ -218,14 +214,38 @@ class Ladder:
         status, html = 0, ""
         verdict = None
         note = ""
-        proxy = None
         group: str | None = None
         tried_groups: set[str] = set()
-        next_proxy = _UNSET
         error_retried = False
         backoff_used = False
         forced = None  # an outcome the ladder knows without a response
         limit = 1 + self.max_retries
+
+        def finish() -> PageFetch:
+            self._remember(host, tier)
+            elapsed = int((time.monotonic() - started) * 1000)
+            return PageFetch(status=status, html=html, attempts=len(steps),
+                             steps=steps, proxy_group=group,
+                             elapsed_ms=elapsed, note=self.scrub(note),
+                             outcome=forced)
+
+        # R33: a page leases one proxy for its whole life. The pool's park
+        # (the cooldown a walled proxy earned for this host) outlives the
+        # page and steers the *next* one; inside this page the tier, not the
+        # proxy, is what the ladder is changing, so the lease is kept across
+        # retries and climbs. With a pool configured there is no fetch
+        # without a lease: no proxy means no page, never the origin IP.
+        if self.pool is not None:
+            proxy = self.pool.acquire(host)
+            if proxy is None:
+                note = f"no proxy available for {host}"
+                forced = "blocked"
+                return finish()
+            group = _group_of(proxy)
+            if group is not None:
+                tried_groups.add(group)
+        else:
+            proxy = None
 
         while len(steps) < limit:
             # A first attempt already submitted still runs; after that an
@@ -236,24 +256,6 @@ class Ladder:
                 note = "tier 3 not available"
                 break
 
-            if next_proxy is not _UNSET:
-                proxy = next_proxy
-                next_proxy = _UNSET
-            elif self.pool is not None:
-                # R27: with a pool configured we never fetch from the origin.
-                # No proxy means either every group is cooling for this host
-                # ("blocked": we never got an answer) or the page already has
-                # a verdict from a real response (keep it: 429, error, ...).
-                if not tried_groups:
-                    proxy = self.pool.acquire(host)
-                else:
-                    proxy = self.pool.alternate(host, set(tried_groups))
-                if proxy is None:
-                    if verdict is None:
-                        note = f"no proxy available for {host}"
-                        forced = "blocked"
-                    break
-
             group = _group_of(proxy)
             if group is not None:
                 tried_groups.add(group)
@@ -262,21 +264,23 @@ class Ladder:
             self.gate.wait((host, group))
             status, html, headers = self._call(url, tier, proxy)
             verdict = classify_fetch(url, status, html)
-            self._report(proxy, host, verdict.outcome)
+            self._report(proxy, host, verdict)
 
             if verdict.outcome in _TERMINAL:
                 break
 
             if verdict.outcome == "rate_limited":
-                alternate = (self.pool.alternate(host, set(tried_groups))
-                             if self.pool is not None else None)
-                if alternate is not None:
-                    next_proxy = alternate
+                # Spec 4.2 rule 2: a different group first. No other group
+                # left means this is the proxy's pace, not the whole pool's
+                # problem -- keep the lease and back off once.
+                switched = self._alternate(host, tried_groups)
+                if switched is not None:
+                    proxy = switched
                     continue
-                # Spec 4.2: ONE backoff per page. Retry the same tier once
-                # after waiting, and take the 429 as final if it comes back
-                # -- a second cooldown buys nothing (and no wait is spent on
-                # an attempt budget that is already used up).
+                # ONE backoff per page: retry the same tier once after
+                # waiting, and take the 429 as final if it comes back (a
+                # second cooldown buys nothing, and no wait is spent on an
+                # attempt budget that is already used up).
                 if backoff_used or len(steps) >= limit:
                     break
                 backoff_used = True
@@ -285,20 +289,25 @@ class Ladder:
                 continue
 
             if verdict.outcome == "blocked":
-                if not verdict.challenge and self.pool is not None:
-                    alternate = self.pool.alternate(host, set(tried_groups))
-                    if alternate is not None:
-                        next_proxy = alternate
+                # Spec 4.2 rule 4: a plain 403 buys one other group before a
+                # heavier tier. A challenge is not the proxy's fault (rule
+                # 3): climb on the lease.
+                if not verdict.challenge:
+                    switched = self._alternate(host, tried_groups)
+                    if switched is not None:
+                        proxy = switched
                         continue
                 reason = "challenge" if verdict.challenge else "blocked"
                 climbed, note = self._climb(url, tier, reason)
                 if climbed is None:
                     break
                 tier = climbed
-                tried_groups, error_retried = set(), False
+                error_retried = False
                 continue
 
             if verdict.outcome == "error":
+                # A 5xx / status 0 is the tier's (or the moment's) problem,
+                # not the proxy's: keep the lease.
                 if not error_retried:
                     # One same-tier retry (a reset connection, not a wall).
                     error_retried = True
@@ -307,16 +316,12 @@ class Ladder:
                 if climbed is None:
                     break
                 tier = climbed
-                tried_groups, error_retried = set(), False
+                error_retried = False
                 continue
 
             break  # unknown outcome: do not loop on it
 
-        self._remember(host, tier)
-        elapsed = int((time.monotonic() - started) * 1000)
-        return PageFetch(status=status, html=html, attempts=len(steps),
-                         steps=steps, proxy_group=group, elapsed_ms=elapsed,
-                         note=self.scrub(note), outcome=forced)
+        return finish()
 
     # -- helpers -----------------------------------------------------------
 
@@ -353,9 +358,30 @@ class Ladder:
         status, html = result
         return status, html, {}
 
-    def _report(self, proxy, host: str, outcome: str) -> None:
+    def _alternate(self, host: str, tried_groups: set[str]):
+        """One proxy from a group not tried yet for this page, else None.
+
+        Called once per network-level verdict (a 429, a plain 403) and only
+        ever to *move* the lease; returning None means the page keeps the
+        proxy it holds and follows the normal rule for that verdict (R33).
+        """
+        if self.pool is None:
+            return None
+        alternate = getattr(self.pool, "alternate", None)
+        if alternate is None:
+            return None
+        return alternate(host, set(tried_groups))
+
+    def _report(self, proxy, host: str, verdict) -> None:
+        """Hand the verdict to the pool, challenge included.
+
+        R34: only network-level verdicts park a (proxy, host) pair. A
+        challenge proves the proxy reached the site, so it is the site that
+        is walled, not the endpoint -- the pool leaves that pair alone.
+        """
         if self.pool is not None and proxy is not None:
-            self.pool.report(proxy, host, outcome)
+            self.pool.report(proxy, host, verdict.outcome,
+                             challenge=bool(verdict.challenge))
 
     def scrub(self, text: str) -> str:
         """Page notes go on to logs and datasets: no proxy credential there.

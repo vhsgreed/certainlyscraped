@@ -117,7 +117,8 @@ def scrape(config: str | dict, *, tier: int | None = None,
            fetcher: Fetcher | None = None, log=sys.stderr,
            guard=None, pool=None, use_env: bool = True,
            base_dir: str | None = None,
-           proxies_from_file: bool = False) -> ScrapeResult:
+           proxies_from_file: bool = False,
+           proxy_source: str = "auto") -> ScrapeResult:
     """Fetch every page the config paginates over and extract its items.
 
     tier: override the config's tier (skips the probe). The ladder starts
@@ -136,6 +137,8 @@ def scrape(config: str | dict, *, tier: int | None = None,
               against; defaults to the config file's own directory.
     proxies_from_file: the proxy list came from a dedicated proxies file, so
               a password in its URLs is allowed (R31).
+    proxy_source: "flag" when the config's ``proxies`` is an explicit
+              ``--proxies FILE`` list: it then outranks the environment (R35).
     """
     cfg = load_config(config)
     if base_dir is None and isinstance(config, str):
@@ -145,7 +148,8 @@ def scrape(config: str | dict, *, tier: int | None = None,
     if pool is None and fetcher is None:
         pool = ProxyPool.from_config(cfg, base_dir=base_dir or ".",
                                      allow_userinfo=proxies_from_file,
-                                     use_env=use_env)
+                                     use_env=use_env,
+                                     proxy_source=proxy_source)
 
     # A pool knows its secrets and its own addresses; a pool that does not
     # (a test double) still gets the generic credential mask.

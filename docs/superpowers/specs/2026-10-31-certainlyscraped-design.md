@@ -83,20 +83,28 @@ proxies:
 - `acquire(host) -> Proxy | None`: picks a proxy not cooling down for `host` and whose
   per-host pace allows a request now; blocks until one is free or returns None when
   every proxy is cooling down for that host.
-- `report(proxy, host, outcome)`: `ok` resets; `blocked` / `rate_limited` puts that proxy
-  in cooldown for that host only.
+- `report(proxy, host, outcome)`: `ok` resets; `rate_limited`, `error` and a `blocked`
+  **without** challenge markers put that proxy in cooldown for that host only. A
+  challenge parks nothing: the proxy reached the site, so the site is the problem.
 - `alternate(host, exclude_groups) -> Proxy | None`: a proxy from a group not yet tried
   for this page.
 - **Groups:** gateway proxies form one group per gateway; list proxies use their label,
   else their /16 (IPv4) or /48 (IPv6) prefix; hostnames without a label are their own group.
 - `session: rotate` generates a new random session token per request; `sticky` keeps one
   per (host, worker).
-- **Never without a proxy (R27):** when a pool is configured, a page is fetched through a
-  proxy or not at all. If `acquire`/`alternate` return None (every group is cooling for
-  that host), the page stops with outcome `blocked` and the note
-  `no proxy available for <host>`; a verdict already reached (a 429, an error) is kept.
-  The ladder never falls back to the origin IP and never reuses a proxy the pool just
-  parked.
+- **Never without a proxy (R27, corrected by R33):** when a pool is configured, a page is
+  fetched through a proxy or not at all. If `acquire` returns None at the start of the
+  page (every group is cooling for that host), the page stops with outcome `blocked` and
+  the note `no proxy available for <host>`; a verdict already reached is kept. There is
+  no fallback to the origin IP.
+- **One proxy per page (R33):** a page *leases* the proxy `acquire` gave it for its whole
+  life. A network-level verdict (a 429, or a 403 without challenge markers) tries
+  `alternate` once and moves the lease to the new group if one is free; with none left the
+  page keeps the proxy it holds and follows the normal rule (back off once and retry, or
+  climb the tier). A challenge, a 5xx/status-0 error and every climb keep the current
+  proxy: the tier is what is changing, not the endpoint. A park earned by this page still
+  applies to the *next* page on that host, never to the page that is already running —
+  otherwise the first wall would end the ladder.
 - **Secrets:** passwords only from environment variables named in the config, or from a
   dedicated proxies file (`--proxies`, `CERTAINLYSCRAPED_PROXIES`). Every log line, page
   outcome and MCP response shows the group label, never the URL, host or password --

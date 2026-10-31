@@ -871,3 +871,87 @@ def test_gateway_refuses_a_literal_password_in_the_template():
         ProxyPool.from_config(cfg, env={"GATEWAY_PASSWORD": "pw"})
     assert "password_env" in str(exc.value) or "--proxies" in str(exc.value)
     assert "hunter2" not in str(exc.value)
+
+
+# --- fix round 2: R34 (a challenge parks nothing) --------------------------
+
+def test_a_challenge_parks_nothing_but_a_plain_block_does():
+    """R34: blocked-with-challenge is the site's problem, not the proxy's."""
+    pool = ProxyPool.from_config({"proxies": ["http://a:1 # a"]}, env={})
+    proxy = pool.acquire("h.test")
+    pool.report(proxy, "h.test", "blocked", challenge=True)
+    assert pool.acquire("h.test") is not None
+    pool.report(proxy, "h.test", "blocked")
+    assert pool.acquire("h.test") is None
+    pool.report(proxy, "h.test", "rate_limited")
+    assert pool.acquire("h.test") is None
+
+
+# --- fix round 2: a gateway host that only lives in the template ----------
+
+def test_gateway_host_only_in_the_template_is_scrubbed():
+    """Spec s5's own example: no `host:` key, the address is in the template."""
+    cfg = {"proxies": {"gateway": {
+        "template": "http://{user}-country-{country}-session-{session}:"
+                    "{password}@gw.example:7000",
+        "user": "me", "country": "se",
+        "password_env": "GATEWAY_PASSWORD", "session": "rotate"}}}
+    pool = ProxyPool.from_config(cfg, env={"GATEWAY_PASSWORD": "pw"})
+    assert pool.groups() == ["gateway"]
+    for text in ("connect to gw.example:7000 failed", "gw.example",
+                 "http://gw.example:7000/", "pw"):
+        assert "gw.example" not in pool.scrub(text)
+        assert "pw" not in pool.scrub(text)
+
+
+# --- fix round 2: _redact_exc needs the config's directory ----------------
+
+def test_redact_exc_resolves_a_proxies_file_against_the_config(tmp_path,
+                                                              monkeypatch):
+    (tmp_path / "proxies.txt").write_text(PROXY_URL + "\n", encoding="utf-8")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)  # CWD is not the config's directory
+    detail = cli._redact_exc(RuntimeError("connect to 10.1.2.3:8000 refused"),
+                             {"proxies": {"list": "proxies.txt"}},
+                             base_dir=str(tmp_path))
+    assert "10.1.2.3" not in detail
+    assert "s3cret" not in detail
+    assert "***" in detail
+
+
+# --- fix round 2: R35 proxy precedence ------------------------------------
+
+def test_proxy_precedence_flag_then_env_then_config(tmp_path, monkeypatch):
+    """--no-proxy > --proxies FILE > CERTAINLYSCRAPED_PROXIES > config."""
+    cfg_path = tmp_path / "cfg.yaml"
+    cfg_path.write_text(
+        "url: https://h.test/1\n"
+        "proxies:\n  - 'http://cfg:1 # cfgg'\n"
+        "items: {selector: li}\n", encoding="utf-8")
+    flag = tmp_path / "p.txt"
+    flag.write_text("http://flag:1 # flagg\n", encoding="utf-8")
+    seen = {}
+
+    def fake(config, log=None, **kwargs):
+        loaded = api.load_config(config)
+        pool = ProxyPool.from_config(
+            loaded, use_env=kwargs.get("use_env", True),
+            proxy_source=kwargs.get("proxy_source", "auto"))
+        seen["groups"] = None if pool is None else pool.groups()
+        return ScrapeResult(rows=[{"a": 1}], pages=1, tier=1,
+                            config=dict(loaded))
+
+    monkeypatch.setattr(cli, "scrape", fake)
+    monkeypatch.delenv("CERTAINLYSCRAPED_PROXIES", raising=False)
+
+    def groups(*argv):
+        cli.main(["run", str(cfg_path), "--out", str(tmp_path / "o.csv"),
+                  *argv])
+        return seen["groups"]
+
+    assert groups() == ["cfgg"]                      # config alone
+    monkeypatch.setenv("CERTAINLYSCRAPED_PROXIES", "http://env:1 # envg")
+    assert groups() == ["envg"]                      # env beats config
+    assert groups("--proxies", str(flag)) == ["flagg"]  # flag beats env
+    assert groups("--no-proxy") is None              # flag off beats all

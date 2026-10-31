@@ -223,6 +223,14 @@ class ProxyPool:
             self._gateways[gateway.label] = gateway
             _append(self._passwords, gateway.password)
             _append(self._passwords, gateway.encoded_password)
+            # The spec's own s5 example names the gateway host inside the
+            # template and nowhere else, so the address to scrub has to come
+            # out of the URL the template builds (R33/misc): host,
+            # host:port and the URL itself.
+            sample = gateway.build("session")
+            _append(self._addresses, sample)
+            _append(self._addresses, _netloc(sample))
+            _append_host(self._addresses, _hostname(sample))
             if gateway.host:
                 _append_host(self._addresses, gateway.host)
                 if gateway.port:
@@ -238,13 +246,15 @@ class ProxyPool:
     @classmethod
     def from_config(cls, cfg: dict, env=None, base_dir: str = ".",
                     *, allow_userinfo: bool = False, use_env: bool = True,
+                    proxy_source: str = "auto",
                     clock=time.monotonic, token_factory=None):
         """The pool a config asks for, or None when it names no proxy.
 
-        ``CERTAINLYSCRAPED_PROXIES`` (a newline/comma separated list) replaces
-        the config's ``proxies`` value when ``use_env`` is true; ``--no-proxy``
-        passes ``use_env=False`` so the environment cannot re-enable a proxy
-        the operator just switched off.
+        Precedence (R35): ``--no-proxy`` > an explicit ``--proxies FILE`` >
+        ``CERTAINLYSCRAPED_PROXIES`` > the config. ``use_env=False`` is the
+        first rung (nothing comes through the environment); ``proxy_source=
+        "flag"`` is the second: the caller already put the flag's list in
+        ``cfg["proxies"]``, so the environment must not override it.
 
         ``allow_userinfo`` says the proxy list came from a dedicated proxies
         file (or the environment), where a password is allowed. A password
@@ -252,9 +262,13 @@ class ProxyPool:
         """
         cfg = cfg or {}
         env = os.environ if env is None else env
+        if proxy_source not in ("auto", "flag"):
+            raise ValueError("proxy_source must be 'auto' or 'flag', got "
+                             f"{proxy_source!r}")
         raw = cfg.get("proxies")
         override = ((env or {}).get(ENV_PROXIES)
-                    if (env is not None and use_env) else None)
+                    if (env is not None and use_env
+                        and proxy_source != "flag") else None)
         if override:
             raw = [part.strip() for part in re.split(r"[,\n]", override)
                    if part.strip()]
@@ -312,9 +326,19 @@ class ProxyPool:
         with self._lock:
             return self._issue(host, frozenset(exclude_groups or ()))
 
-    def report(self, proxy, host: str, outcome: str) -> None:
-        """Blocked/rate_limited/error park the pair; ok clears it."""
+    def report(self, proxy, host: str, outcome: str, *,
+               challenge: bool = False) -> None:
+        """Rate-limited/plain-blocked/error park the pair; ok clears it.
+
+        R34: a challenge parks nothing and clears nothing. The page came
+        back walled *with* challenge markers, which means the proxy reached
+        the site -- the site is the problem, so penalising the endpoint
+        would only send the next page onto a proxy that is no better and
+        burn a good one out of the rotation.
+        """
         if proxy is None:
+            return
+        if outcome == "blocked" and challenge:
             return
         key = self._key(proxy)
         with self._lock:
