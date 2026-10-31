@@ -300,3 +300,213 @@ def test_scrape_default_fetcher_applies_guard():
     }
     with pytest.raises(PrivateAddressError, match="private address"):
         scrape(cfg, guard=lambda u: check_url(u), log=None)
+
+
+# --- the proxy URL is guarded too (fix round 1, R12) -----------------------
+
+PRIVATE_PROXY = "http://127.0.0.1:2375"
+PUBLIC_PROXY = f"http://{PUBLIC_V4}:3128"
+
+
+def test_tier1_private_proxy_refused_before_any_request():
+    seen = []
+
+    def handler(request):
+        seen.append(str(request.url))
+        return httpx.Response(200, text="ok")
+
+    resolve = _resolver({"public.example": [PUBLIC_V4]})
+    with pytest.raises(PrivateAddressError, match="127.0.0.1") as e:
+        fetch_mod.fetch("https://public.example/", 1, proxy=PRIVATE_PROXY,
+                        guard=_guard(resolve), transport=_mock(handler))
+    assert "2375" not in str(e.value)  # message names the host, not credentials
+    assert seen == []                  # the transport never saw a request
+
+
+class _FakeClient:
+    """Stands in for httpx.Client so a proxy test never opens a socket."""
+
+    def __init__(self, calls):
+        self.calls = calls
+        self.kwargs = None
+
+    def __call__(self, **kwargs):
+        self.kwargs = kwargs
+        self.calls.append(("client", kwargs.get("proxy")))
+        return self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def get(self, url):
+        self.calls.append(("get", url))
+        return httpx.Response(200, text="ok")
+
+
+def _fake_httpx_client(monkeypatch):
+    import httpx as _httpx
+
+    calls = []
+    fake = _FakeClient(calls)
+    monkeypatch.setattr(_httpx, "Client", fake)
+    return calls
+
+
+def test_tier1_public_proxy_allowed(monkeypatch):
+    calls = _fake_httpx_client(monkeypatch)
+    guarded = []
+
+    def guard(url):
+        guarded.append(url)
+        check_url(url, resolve=_resolver({"public.example": [PUBLIC_V4]}))
+
+    status, text = fetch_mod.fetch("https://public.example/", 1,
+                                   proxy=PUBLIC_PROXY, guard=guard)
+    assert (status, text) == (200, "ok")
+    assert guarded == [PUBLIC_PROXY, "https://public.example/"]
+    assert calls == [("client", PUBLIC_PROXY), ("get", "https://public.example/")]
+
+
+def test_tier1_private_proxy_allowed_with_allow_private(monkeypatch):
+    calls = _fake_httpx_client(monkeypatch)
+
+    def guard(url):
+        check_url(url, allow_private=True, resolve=_no_resolve)
+
+    status, text = fetch_mod.fetch("https://public.example/", 1,
+                                   proxy=PRIVATE_PROXY, guard=guard)
+    assert (status, text) == (200, "ok")
+    assert calls == [("client", PRIVATE_PROXY),
+                     ("get", "https://public.example/")]
+
+
+def test_tier1_proxy_credentials_never_leak():
+    def handler(request):
+        return httpx.Response(200, text="ok")
+
+    with pytest.raises(PrivateAddressError) as e:
+        fetch_mod.fetch("https://public.example/", 1,
+                        proxy="http://user:secret@127.0.0.1:2375",
+                        guard=_guard(_resolver({"public.example": [PUBLIC_V4]})),
+                        transport=_mock(handler))
+    assert "127.0.0.1" in str(e.value)
+    assert "secret" not in str(e.value) and "user" not in str(e.value)
+
+
+def _fake_curl_cffi(monkeypatch, calls):
+    from curl_cffi import requests as cr
+
+    class Resp:
+        def __init__(self, status, text="", headers=None):
+            self.status_code = status
+            self.text = text
+            self.headers = headers or {}
+
+    def fake_get(url, **kw):
+        calls.append((url, kw))
+        return Resp(200, "ok")
+
+    monkeypatch.setattr(cr, "get", fake_get)
+
+
+def test_tier2_private_proxy_refused_before_any_request(monkeypatch):
+    calls = []
+    _fake_curl_cffi(monkeypatch, calls)
+    resolve = _resolver({"public.example": [PUBLIC_V4]})
+    with pytest.raises(PrivateAddressError, match="127.0.0.1"):
+        fetch_mod.fetch("https://public.example/", 2, proxy=PRIVATE_PROXY,
+                        guard=_guard(resolve))
+    assert calls == []
+
+
+def test_tier2_public_proxy_allowed(monkeypatch):
+    calls = []
+    _fake_curl_cffi(monkeypatch, calls)
+    resolve = _resolver({"public.example": [PUBLIC_V4]})
+    assert fetch_mod.fetch("https://public.example/", 2, proxy=PUBLIC_PROXY,
+                           guard=_guard(resolve)) == (200, "ok")
+    assert [u for u, _ in calls] == ["https://public.example/"]
+    assert calls[0][1].get("proxy") == PUBLIC_PROXY
+
+
+def test_tier2_private_proxy_allowed_with_allow_private(monkeypatch):
+    calls = []
+    _fake_curl_cffi(monkeypatch, calls)
+
+    def guard(url):
+        check_url(url, allow_private=True, resolve=_no_resolve)
+
+    assert fetch_mod.fetch("https://public.example/", 2, proxy=PRIVATE_PROXY,
+                           guard=guard) == (200, "ok")
+    assert [u for u, _ in calls] == ["https://public.example/"]
+
+
+def test_scrape_guards_the_config_proxy(monkeypatch):
+    from certainlyscraped import api as api_mod
+
+    real_fetch = fetch_mod.fetch
+    seen = []
+
+    def handler(request):
+        seen.append(str(request.url))
+        return httpx.Response(200, text="<html><li>x</li></html>")
+
+    def fake_fetch(url, tier, **kw):
+        return real_fetch(url, tier, transport=_mock(handler), **kw)
+
+    monkeypatch.setattr(api_mod, "_fetch", fake_fetch)
+    cfg = {
+        "url": "https://public.example/",
+        "items": {"selector": "li"},
+        "fields": {"t": {"selector": "li"}},
+        "tier": 1,
+        "rate_limit_sec": 0,
+        "proxy": "http://169.254.169.254:80",
+    }
+    guard = _guard(_resolver({"public.example": [PUBLIC_V4]}))
+    with pytest.raises(PrivateAddressError, match="169.254.169.254"):
+        scrape(cfg, guard=guard, log=None)
+    assert seen == []
+
+
+# --- assist.load_page: re-raise under a guard, stay silent (R14) -----------
+
+def test_load_page_walled_site_raises_under_guard(capsys, monkeypatch):
+    from certainlyscraped import classify
+    from certainlyscraped.assist import load_page
+
+    class R:
+        tier = 3
+        note = "cloudflare challenge"
+
+    monkeypatch.setattr(classify, "probe", lambda url, *a, **k: R())
+    with pytest.raises(FetchError, match="tier 3 disabled under the MCP guard"):
+        load_page("https://public.example/", tier="auto", log=None,
+                  guard=lambda u: None)
+    assert capsys.readouterr().out == ""
+
+
+def test_load_page_log_none_writes_nothing_to_stdout(capsys, monkeypatch):
+    from certainlyscraped import assist, classify
+
+    class R:
+        tier = 2
+        note = "plain html"
+
+    monkeypatch.setattr(classify, "probe", lambda url, *a, **k: R())
+    monkeypatch.setattr(assist, "fetch", lambda url, tier, **kw: (500, "boom"))
+    url, html, tier = assist.load_page("https://public.example/", tier="auto",
+                                       log=None, guard=lambda u: None)
+    assert (url, html, tier) == ("https://public.example/", "boom", 2)
+    assert capsys.readouterr().out == ""
+
+
+def test_load_page_missing_file_log_none_is_silent(tmp_path, capsys):
+    from certainlyscraped.assist import load_page
+
+    with pytest.raises(SystemExit):
+        load_page(str(tmp_path / "nope.html"), tier="1", log=None)
+    assert capsys.readouterr().out == ""

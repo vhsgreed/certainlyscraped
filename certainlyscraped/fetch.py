@@ -30,10 +30,12 @@ def fetch(url: str, tier: int, timeout: int = 30, proxy: str | None = None,
     developed against a page saved once with `certainlyscraped fetch`.
 
     guard: callable(url) -> None, e.g. netguard.check_url. When set, tiers 1
-    and 2 follow redirects by hand and call the guard before every request,
-    so a public URL cannot bounce the fetcher into an internal address. Tier
-    3 (a browser) cannot be policed per-hop and is disabled; file:// is left
-    to the caller, which reads workdir files itself.
+    and 2 call the guard on the proxy (if any) before building the client,
+    follow redirects by hand and call the guard before every request, so
+    neither a public URL nor a public proxy can route the fetcher into an
+    internal address. Tier 3 (a browser) cannot be policed per-hop and is
+    disabled; file:// is left to the caller, which reads workdir files
+    itself.
     transport: test-only httpx transport (httpx.MockTransport).
     """
     if url.startswith("file://"):
@@ -113,11 +115,20 @@ def _fetch_httpx(url, timeout, proxy, cookies, transport=None) -> tuple[int, str
     return r.status_code, r.text
 
 
+def _guard_proxy(proxy, guard) -> None:
+    """A proxy is a request destination too: 127.0.0.1:2375 (a Docker
+    socket), 169.254.169.254 (metadata), an internal squid. Guarding only
+    the target URL lets a config keep `url` public and aim `proxy` inward."""
+    if proxy:
+        guard(proxy)
+
+
 def _fetch_httpx_guarded(url, timeout, proxy, cookies, guard, transport):
     """Tier 1 with redirects followed one hop at a time, guard first."""
     import httpx
     from urllib.parse import urljoin
 
+    _guard_proxy(proxy, guard)
     with httpx.Client(**_client_kwargs(timeout, proxy, cookies, transport,
                                        follow_redirects=False)) as client:
         return _guarded_get(client.get, url, guard, urljoin,
@@ -132,6 +143,7 @@ def _fetch_curl_cffi_guarded(url, timeout, proxy, cookies, guard):
         from curl_cffi import requests as cr
     except ImportError as e:
         raise FetchError("tier 2 needs curl_cffi: pip install curl_cffi") from e
+    _guard_proxy(proxy, guard)
     kwargs = dict(impersonate="chrome", timeout=timeout, allow_redirects=False)
     if proxy:
         kwargs["proxy"] = proxy

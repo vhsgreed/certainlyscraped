@@ -23,23 +23,29 @@ def load_page(target: str, tier: str = "auto", log=sys.stderr,
     guard: optional netguard.check_url-style callable, applied to the probe
     and every fetch hop. Under a guard a file:// target is refused here; the
     caller (e.g. the MCP server) decides which files inside its workdir are
-    readable. A PrivateAddressError propagates instead of becoming a CLI
-    exit, so a policy refusal stays catchable."""
+    readable. With a guard, any fetch failure (a PrivateAddressError, but
+    also FetchError("tier 3 disabled under the MCP guard") for a walled site)
+    propagates instead of becoming a CLI exit: a SystemExit inside a stdio
+    MCP server would kill the server. Every diagnostic print is behind
+    `if log:`, because log=None must write nothing at all -- stdout is the
+    JSON-RPC channel there."""
     url = to_url(target)
     if url.startswith("file://"):
         if guard is not None:
             raise FetchError("file:// not allowed under the guard")
         status, html = fetch(url, 1)
         if status != 200:
-            print(f"[fetch] {target}: file not found", file=log)
+            if log:
+                print(f"[fetch] {target}: file not found", file=log)
             sys.exit(1)
         return url, html, 1
     if tier == "auto":
         from .classify import probe
         res = probe(url, guard=guard)
         t = res.tier
-        print(f"[probe] {url} -> tier {t} ({res.note})", file=log)
-        if t >= 3:
+        if log:
+            print(f"[probe] {url} -> tier {t} ({res.note})", file=log)
+        if t >= 3 and log:
             print("[probe] walled: tiers 1-2 get a challenge page. Results "
                   "below come from that page, not the real one.", file=log)
     else:
@@ -49,9 +55,12 @@ def load_page(target: str, tier: str = "auto", log=sys.stderr,
     except PrivateAddressError:
         raise
     except Exception as e:  # noqa: BLE001 - network errors end the command cleanly
-        print(f"[fetch] {url}: {type(e).__name__}: {e}", file=log)
+        if guard is not None:
+            raise  # a guarded caller (MCP) must see the error, not die
+        if log:
+            print(f"[fetch] {url}: {type(e).__name__}: {e}", file=log)
         sys.exit(1)
-    if status >= 400:
+    if status >= 400 and log:
         print(f"[fetch] {url}: HTTP {status}", file=log)
     return url, html, t
 
