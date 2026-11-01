@@ -4,6 +4,16 @@ All notable changes to this project are documented here. Version 0.4.0 is the
 first release under the name `certainlyscraped`; earlier releases shipped as
 `scrapeforge`.
 
+## [Unreleased]
+
+### Changed
+
+- `COVERAGE.md` no longer counts any repeated block as `rows`. Two new
+  verdicts, `noise` (tracking or consent JSON) and `no-price` (a marketplace
+  page with no prices), and a `fields found` column as the evidence. The
+  first run moved youtube-search and prisjakt out of `rows`. Found because
+  chrono24 and super-hobby were reported as working on 2026-11-01 and were not.
+
 ## [0.4.5] - 2026-11-01
 
 ### Added

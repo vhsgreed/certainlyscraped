@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import platform
+import re
 import sys
 import time
 from pathlib import Path
@@ -35,6 +36,24 @@ from certainlyscraped.fetch import fetch  # noqa: E402
 from certainlyscraped.suggest import suggest  # noqa: E402
 
 PAUSE_SEC = 2.0
+
+# Verdicts that count as "this target works". --check holds the sandbox rows
+# to it; everything else is information.
+PASSING = {"rows"}
+
+# Keys that mean an embedded JSON "list" is tracking state, not data:
+# chrono24's dataLayerPushes gave 10 "items" with keys 0, 1, 2_ad_storage,
+# page_c24sid. A listing has title/text/url keys instead.
+_NOISE_KEY = re.compile(
+    r"^\d|(^|_)(ad|ads|gtm|gtag|consent|analytics|sid|session|page|event|ga|utm)(_|$)")
+
+# Paths into embedded JSON that lead to page chrome rather than records.
+# youtube-search's 83 "items" were consentBumpV2Renderer.languageList.
+_NOISE_PATH = re.compile(
+    r"consent|datalayer|language|dropdown|topbar|menu|settings|tracking|analytics", re.I)
+
+# Groups where a list without prices is not the list a person came for.
+_PRICED_GROUPS = {"marketplaces"}
 
 
 def load_targets(path: Path, only: str | None) -> list[dict]:
@@ -58,10 +77,13 @@ def row(t: dict) -> dict:
         r = probe(t["url"], timeout=25)
     except Exception as exc:  # noqa: BLE001 - a failed probe is data
         return {**t, "tier": "-", "status": "-", "items": "-", "walled": True, "bytes": 0,
+                "fields": [], "source": "-",
                 "note": f"{type(exc).__name__}: {exc}"[:140]}
 
     walled = r.note.startswith("blocked") or r.tier >= 3
     items, items_note = "-", ""
+    fields: list[str] = []
+    source, json_path = "-", ""
     if not walled:
         try:
             # fetch() returns (status_code, html), plus headers on request.
@@ -72,6 +94,9 @@ def row(t: dict) -> dict:
                 items, items_note = "0", "no item blocks"
             else:
                 items = str(s.item_count)
+                fields = list(s.fields)
+                source = "json" if "json" in s.items else "html"
+                json_path = f"{s.items.get('json', '')}:{s.items.get('path', '')}"
                 if s.item_count < 5:
                     items_note = f"only {s.item_count}, weak"
         except Exception as exc:  # noqa: BLE001 - a failed read is data
@@ -79,16 +104,22 @@ def row(t: dict) -> dict:
 
     note = r.note if not items_note else f"{r.note}; {items_note}"
     return {**t, "tier": str(r.tier), "status": str(r.status), "note": note[:140],
-            "items": items, "walled": walled, "bytes": r.body_size}
+            "items": items, "walled": walled, "bytes": r.body_size,
+            "fields": fields, "source": source, "json_path": json_path}
 
 
 def table(rows: list[dict]) -> str:
-    out = ["| target | verdict | tier | HTTP | items | what happened |",
-           "|---|---|---|---|---|---|"]
+    out = ["| target | verdict | tier | HTTP | items | fields found | what happened |",
+           "|---|---|---|---|---|---|---|"]
     for r in rows:
         note = r["note"].replace("|", "\\|")
+        # The guessed field names are the evidence for the verdict: "title,
+        # url, price" reads as a listing, "0, 1, 2_ad_storage" does not.
+        shown = r.get("fields") or []
+        fields = ", ".join(shown[:5]) + (" ..." if len(shown) > 5 else "")
+        fields = (f"{r['source']}: {fields}" if fields else "-").replace("|", "\\|")
         out.append(f"| `{r['name']}` | {r['verdict']} | {r['tier']} | {r['status']} "
-                   f"| {r['items']} | {note} |")
+                   f"| {r['items']} | {fields} | {note} |")
     return "\n".join(out)
 
 
@@ -107,7 +138,20 @@ def verdict(r: dict) -> str:
         return "error"
     if n == 0:
         return "shell"
-    return "thin" if n < 5 else "rows"
+    if n < 5:
+        return "thin"
+    names = r.get("fields") or []
+    # A repeated block is not automatically the data. Two false "rows" on
+    # 2026-11-01 were analytics JSON (chrono24) and a priceless homepage
+    # carousel (super-hobby); both checks below exist because of them.
+    if r.get("source") == "json" and (
+            _NOISE_PATH.search(r.get("json_path") or "")
+            or (names and sum(bool(_NOISE_KEY.search(k)) for k in names) * 2 >= len(names))):
+        return "noise"
+    if r.get("group") in _PRICED_GROUPS and \
+            not any("price" in k or "pris" in k for k in names):
+        return "no-price"
+    return "rows"
 
 
 def main() -> int:
@@ -155,6 +199,8 @@ def main() -> int:
         f"Of {len(rows)} targets: **{tally.get('rows', 0)} returned rows**, "
         f"{tally.get('thin', 0)} returned a couple, "
         f"{tally.get('shell', 0)} returned a JavaScript shell, "
+        f"{tally.get('noise', 0) + tally.get('no-price', 0)} returned a repeated block "
+        f"that is not the data, "
         f"{tally.get('walled', 0)} were walled"
         + (f", {tally['error']} failed" if tally.get("error") else "") + ".",
         "",
@@ -163,6 +209,8 @@ def main() -> int:
         "| rows | 5 or more item blocks found in the HTML that came back |",
         "| thin | 1 to 4: a real page, not a listing, or a listing mostly drawn by script |",
         "| shell | HTTP 200 and zero items: the page exists, the data is drawn later by JavaScript |",
+        "| noise | a repeated block was found, but it is tracking or settings JSON, not records |",
+        "| no-price | a marketplace page returned repeated blocks with no price: a carousel or nav, not the listing |",
         "| walled | both tier 1 and tier 2 were refused: status code or challenge page |",
         "",
         "Generated by `scripts/coverage.py`; edit `targets/popular.yaml`, not this file.",
@@ -190,7 +238,7 @@ def main() -> int:
     if args.check:
         # The sandbox rows are the table's control group: they must return
         # rows. If they do not, the probe path broke, not the internet.
-        broken = [r for r in rows if r["group"] == "sandbox" and r["verdict"] != "rows"]
+        broken = [r for r in rows if r["group"] == "sandbox" and r["verdict"] not in PASSING]
         for r in broken:
             print(f"sandbox target did not return rows: {r['name']} "
                   f"({r['verdict']}: {r['note']})", file=sys.stderr)
