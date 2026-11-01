@@ -1,0 +1,69 @@
+# Popular data targets, for the nightly coverage matrix (COVERAGE.md).
+#
+# Each entry is probed once per night from a GitHub runner and the verdict is
+# published. Nothing here is a promise: a row says what one request got on a
+# datacenter IP on that date, and nothing more.
+#
+# Why this file exists: people ask "does it do Facebook / Reddit / Amazon"
+# before they ask anything else. The honest answer is a dated matrix that says
+# blocked where it is blocked, instead of a README claim that melts on contact.
+#
+# Adding a target: one request is the whole cost. Keep group names lowercase,
+# keep `name` unique (it keys the matrix), and put the listing URL (not the
+# homepage) when the site has one.
+
+targets:
+  # --- marketplaces: prices, stock, listings -------------------------------
+  - { group: marketplaces, name: amazon-bestsellers, url: "https://www.amazon.com/gp/bestsellers/" }
+  - { group: marketplaces, name: ebay-search, url: "https://www.ebay.com/sch/i.html?_nkw=rtx+4090" }
+  - { group: marketplaces, name: etsy-search, url: "https://www.etsy.com/search?q=ceramic+mug" }
+  - { group: marketplaces, name: aliexpress-search, url: "https://www.aliexpress.com/w/wholesale-led-strip.html" }
+  - { group: marketplaces, name: temu-search, url: "https://www.temu.com/search_result.html?search_key=usb+cable" }
+  - { group: marketplaces, name: prisjakt, url: "https://www.prisjakt.nu/" }
+  - { group: marketplaces, name: blocket-annonser, url: "https://www.blocket.se/annonser/hela_sverige?q=cykel" }
+  - { group: marketplaces, name: hemnet-bostader, url: "https://www.hemnet.se/bostader" }
+
+  # --- social: the ones people ask for first, and the ones that say no -----
+  - { group: social, name: reddit-subreddit, url: "https://www.reddit.com/r/programming/" }
+  - { group: social, name: x-profile, url: "https://x.com/OpenAI" }
+  - { group: social, name: facebook-marketplace, url: "https://www.facebook.com/marketplace/" }
+  - { group: social, name: instagram-tag, url: "https://www.instagram.com/explore/tags/ceramics/" }
+  - { group: social, name: tiktok-tag, url: "https://www.tiktok.com/tag/ceramics" }
+  - { group: social, name: linkedin-jobs, url: "https://www.linkedin.com/jobs/search?keywords=data" }
+  - { group: social, name: youtube-search, url: "https://www.youtube.com/results?search_query=scraping" }
+
+  # --- media --------------------------------------------------------------
+  - { group: media, name: bbc-news, url: "https://www.bbc.com/news" }
+  - { group: media, name: reuters, url: "https://www.reuters.com/" }
+  - { group: media, name: dn, url: "https://www.dn.se/" }
+  - { group: media, name: aftonbladet, url: "https://www.aftonbladet.se/" }
+  - { group: media, name: hn-front, url: "https://news.ycombinator.com/" }
+  - { group: media, name: lobsters, url: "https://lobste.rs/" }
+  - { group: media, name: wikipedia-article, url: "https://en.wikipedia.org/wiki/Web_scraping" }
+
+  # --- tech ---------------------------------------------------------------
+  - { group: tech, name: github-trending, url: "https://github.com/trending" }
+  - { group: tech, name: stackoverflow-questions, url: "https://stackoverflow.com/questions" }
+  - { group: tech, name: pypi-search, url: "https://pypi.org/search/?q=scraper" }
+  - { group: tech, name: npm-search, url: "https://www.npmjs.com/search?q=scraper" }
+
+  # --- jobs ---------------------------------------------------------------
+  - { group: jobs, name: indeed-se, url: "https://se.indeed.com/jobs?q=python" }
+  - { group: jobs, name: platsbanken, url: "https://arbetsformedlingen.se/platsbanken/annonser" }
+
+  # --- reviews ------------------------------------------------------------
+  - { group: reviews, name: trustpilot, url: "https://www.trustpilot.com/categories/shop" }
+  - { group: reviews, name: yelp-search, url: "https://www.yelp.com/search?find_desc=pizza&find_loc=Stockholm" }
+  - { group: reviews, name: imdb-chart, url: "https://www.imdb.com/chart/top/" }
+
+  # --- open data ----------------------------------------------------------
+  - { group: data, name: scb, url: "https://www.scb.se/" }
+  - { group: data, name: eurostat-database, url: "https://ec.europa.eu/eurostat/web/main/data/database" }
+  - { group: data, name: worldbank-data, url: "https://data.worldbank.org/" }
+  - { group: data, name: hitta-search, url: "https://www.hitta.se/s%C3%B6k?vad=caf%C3%A9%20stockholm" }
+  - { group: data, name: allabolag, url: "https://www.allabolag.se/" }
+
+  # --- sandboxes: must stay reachable, or the matrix itself is broken ------
+  - { group: sandbox, name: books-toscrape, url: "https://books.toscrape.com/" }
+  - { group: sandbox, name: quotes-js, url: "https://quotes.toscrape.com/js/" }
+  - { group: sandbox, name: openlibrary-search, url: "https://openlibrary.org/search?q=dune" }

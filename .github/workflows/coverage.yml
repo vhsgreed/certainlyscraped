@@ -1,0 +1,56 @@
+name: coverage
+
+# Probes every target in targets/popular.yaml once and commits COVERAGE.md.
+# This is the machine that keeps the "what can it actually reach" claim honest:
+# a target that starts failing shows up in the table on its own, without
+# anyone claiming a site works.
+#
+# It runs from a GitHub runner, so the verdicts are datacenter-IP verdicts and
+# read worse than a home connection for shops and marketplaces. That is the
+# point: the table says where and how, not what a customer will see.
+on:
+  schedule:
+    - cron: "20 5 * * *"   # 05:20 UTC, after the live check
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: coverage
+  cancel-in-progress: true
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+
+      # --check fails only when a `sandbox` target (books.toscrape,
+      # quotes.toscrape, openlibrary) is unreachable, which means the probing
+      # itself broke. Walling real sites is a finding, not a failure.
+      - name: probe targets
+        run: python scripts/coverage.py --check
+
+      - name: commit COVERAGE.md if it changed
+        run: |
+          if git diff --quiet -- COVERAGE.md; then
+            echo "no change"
+            exit 0
+          fi
+          git config user.name  "certainlyscraped coverage"
+          git config user.email "noreply@github.com"
+          git add COVERAGE.md
+          git commit -m "chore: nightly coverage matrix ($(date -u +%F))"
+          git push
+
+      - name: keep the table for inspection
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: COVERAGE.md

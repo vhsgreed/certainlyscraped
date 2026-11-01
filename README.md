@@ -322,6 +322,16 @@ is the full guide.
   bring gets past IP bans, IP-range bans and rate limits, not a challenge.
 - Ship scraped data. It ships the tool.
 
+## What it reaches
+
+[`COVERAGE.md`](COVERAGE.md) is a table of 39 popular data targets, probed
+nightly and published with a date: which returned rows, which returned a
+JavaScript shell, which were walled. It is generated from
+[`targets/popular.yaml`](targets/popular.yaml) and it updates itself, so a
+site that starts refusing traffic shows up there instead of staying a claim in
+this file. A site behind a login is walled here by definition: tiers 1 to 3 do
+not have your password, and do not ask for it.
+
 ## Why trust the numbers
 
 Every run records one outcome per page, and the daily live check scrapes the
