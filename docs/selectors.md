@@ -92,7 +92,7 @@ fields:
 | `strip` | `true` (default) trims whitespace; a string trims those characters |
 | `regex` | keep group 1, or the whole match if the pattern has no group. No match means missing. |
 | `type` | `str` (default), `int`, or `float`. Reads the first number in the text: `"1,299 kr"` gives 1299 |
-| `decimal` | `","` for European numbers: `"1.299,50 kr"` gives 1299.5 |
+| `decimal` | `","` for European numbers: `"1.299,50 kr"` gives 1299.5. Without it, a `float` guesses: a lone comma followed by one, two or four or more digits is the decimal (`"315,98kr"` gives 315.98), followed by exactly three it is grouping (`"$1,200"` gives 1200); a lone dot stays a decimal, so set `decimal` when `"1.299"` means 1299 |
 | `default` | value when the field is missing or does not parse. Without it, a missing text field is `""` and a missing number is empty (null in JSON). |
 | `absolute` | resolve a relative link against the page URL |
 

@@ -56,3 +56,20 @@ def test_all_joins_every_match_and_types_apply():
 ])
 def test_decimal_comma(raw, want):
     assert clean(raw, {"type": "float", "decimal": ","}) == want
+
+
+@pytest.mark.parametrize("raw,want", [
+    ("315,98kr", 315.98),        # AliExpress SEK, found in the live check
+    ("12,5 %", 12.5),
+    ("1.299,50 kr", 1299.5),     # both marks: the last one is the decimal
+    ("1,299.50", 1299.5),
+    ("$1,200", 1200.0),          # three digits after a lone comma: grouping
+    ("1,200,000", 1200000.0),
+    ("19.99", 19.99),
+])
+def test_float_guesses_the_decimal_mark_without_a_hint(raw, want):
+    assert clean(raw, {"type": "float"}) == want
+
+
+def test_int_keeps_reading_a_lone_comma_as_grouping():
+    assert clean("Price: $1,200", {"type": "int"}) == 1200

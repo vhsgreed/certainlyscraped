@@ -10,6 +10,34 @@ from bs4 import BeautifulSoup
 from .embedded import get_path, items_from_json
 
 _NUMBER = re.compile(r"-?\d[\d,'\u00a0\u202f]*(?:\.\d+)?")
+_NUMBER_TOKEN = re.compile(r"-?\d(?:[\d'\u00a0\u202f]|[.,](?=\d))*")
+
+
+def _guess_float(text: str) -> float | None:
+    """Read a float whose decimal mark is unknown.
+
+    With both marks present the last one is the decimal ("1.299,50", "1,299.50").
+    A lone comma is the decimal unless exactly three digits follow it
+    ("315,98kr" is 315.98, "$1,200" is 1200). Repeated dots are grouping
+    ("1.200.000"). A lone dot stays a decimal: "1.299" is ambiguous, and
+    `decimal: ","` on the field settles it.
+    """
+    m = _NUMBER_TOKEN.search(text)
+    if not m:
+        return None
+    s = re.sub(r"['\u00a0\u202f]", "", m.group(0))
+    if "." in s and "," in s:
+        dec = "." if s.rindex(".") > s.rindex(",") else ","
+        s = s.replace("," if dec == "." else ".", "").replace(dec, ".")
+    elif "," in s:
+        head, _, tail = s.rpartition(",")
+        if s.count(",") == 1 and len(tail) != 3:
+            s = f"{head}.{tail}"
+        else:
+            s = s.replace(",", "")
+    elif s.count(".") > 1:
+        s = s.replace(".", "")
+    return float(s)
 
 
 def extract_page(html: str, cfg: dict, page_url: str | None = None) -> list[dict]:
@@ -158,6 +186,11 @@ def clean(value, spec: dict):
             # 1.299,50 -> 1299.50: drop grouping marks, comma becomes the point.
             text = re.sub(r"(?<=\d)[.\s\u00a0\u202f'](?=\d{3}\b)", "", text)
             text = re.sub(r"(?<=\d),(?=\d)", ".", text)
+        elif typ == "float" and "decimal" not in spec:
+            guessed = _guess_float(text)
+            if guessed is None:
+                return missing
+            return guessed
         m = _NUMBER.search(text)
         if not m:
             return missing

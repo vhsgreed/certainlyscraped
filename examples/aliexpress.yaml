@@ -1,12 +1,17 @@
+# AliExpress search results. Re-made with `certainlyscraped init` on 2026-11-01
+# from a home IP in Sweden (prices in SEK, comma decimals). AliExpress hashes
+# its class names (`--2gO7ZGT`), so these selectors rot: when a run returns
+# 0 rows, re-run `certainlyscraped init <url>` rather than editing by hand.
 name: aliexpress-led-strips
-url: https://www.aliexpress.com/w/wholesale-led-strip.html
+url: "https://www.aliexpress.com/w/wholesale-led-strip.html"
 tier: auto
-max_pages: 3
+max_pages: 1
 rate_limit_sec: 3.0
 items:
-  selector: "div.list-item"
+  selector: "div.list--gallery--C2f2tvm.search-item-card-wrapper-gallery"
 fields:
-  title: { selector: "div.title", attr: text }
-  price: { selector: "span.price-current", attr: text }
-  url:   { selector: "a", attr: href }
+  title: { selector: "h3.new--titleText--2gO7ZGT", attr: text }
+  price: { selector: "div.new--price-sale--1W8OQh-", attr: text, type: float }
+  sold:  { selector: "span.new--trade--Jz0-U1-", attr: text }
+  url:   { selector: "a.search-card-item", attr: href, absolute: true }
 output: csv

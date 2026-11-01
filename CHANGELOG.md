@@ -4,6 +4,18 @@ All notable changes to this project are documented here. Version 0.4.0 is the
 first release under the name `certainlyscraped`; earlier releases shipped as
 `scrapeforge`.
 
+## [0.4.2] - 2026-11-01
+
+### Fixed
+
+- A `type: float` field read a comma decimal as grouping: AliExpress's
+  `315,98kr` came out as 31598. Without a `decimal` hint, a float now
+  guesses the mark: with both marks the last one is the decimal, a lone
+  comma is the decimal unless exactly three digits follow it, and a lone dot
+  stays a decimal. `type: int` and fields with `decimal: ","` are unchanged.
+- `examples/aliexpress.yaml` returned 0 rows: AliExpress renamed its classes.
+  Re-made with `certainlyscraped init`; the file says how to refresh it.
+
 ## [0.4.1] - 2026-10-31
 
 ### Fixed
