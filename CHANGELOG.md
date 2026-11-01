@@ -4,6 +4,15 @@ All notable changes to this project are documented here. Version 0.4.0 is the
 first release under the name `certainlyscraped`; earlier releases shipped as
 `scrapeforge`.
 
+## [0.4.3] - 2026-11-01
+
+### Added
+
+- Listed in the MCP Registry as `io.github.vhsgreed/certainlyscraped`
+  (`server.json`, published by the release workflow after PyPI). Clients that
+  read the registry start it with `uvx --from "certainlyscraped[mcp]" certainlyscraped mcp`.
+- The README's first MCP setup is the `uvx` line, which needs no install step.
+
 ## [0.4.2] - 2026-11-01
 
 ### Fixed

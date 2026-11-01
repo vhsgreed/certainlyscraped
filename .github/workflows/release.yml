@@ -48,3 +48,28 @@ jobs:
           name: dist
           path: dist/
       - uses: pypa/gh-action-pypi-publish@release/v1
+
+  # Lists the server in the MCP Registry (registry.modelcontextprotocol.io)
+  # once the same version is on PyPI. The registry checks that the PyPI
+  # README carries `mcp-name: io.github.vhsgreed/certainlyscraped`; GitHub
+  # OIDC proves the io.github.vhsgreed namespace, so no secret is needed.
+  mcp-registry:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+      - name: wait for the release on PyPI
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          for i in $(seq 1 30); do
+            curl -sf "https://pypi.org/pypi/certainlyscraped/$v/json" >/dev/null && exit 0
+            sleep 10
+          done
+          echo "certainlyscraped $v not on PyPI after 5 minutes"; exit 1
+      - name: install mcp-publisher
+        run: curl -sL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" | tar xz mcp-publisher
+      - run: ./mcp-publisher login github-oidc
+      - run: ./mcp-publisher publish

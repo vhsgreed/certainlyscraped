@@ -1,0 +1,26 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.vhsgreed/certainlyscraped",
+  "title": "certainlyscraped",
+  "description": "Hybrid scraper with escalating effort: cheapest fetch first, reports why each page stopped.",
+  "repository": {
+    "url": "https://github.com/vhsgreed/certainlyscraped",
+    "source": "github"
+  },
+  "version": "0.4.3",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "certainlyscraped",
+      "version": "0.4.3",
+      "runtimeHint": "uvx",
+      "runtimeArguments": [
+        { "type": "named", "name": "--from", "value": "certainlyscraped[mcp]==0.4.3" }
+      ],
+      "packageArguments": [
+        { "type": "positional", "value": "mcp" }
+      ],
+      "transport": { "type": "stdio" }
+    }
+  ]
+}
