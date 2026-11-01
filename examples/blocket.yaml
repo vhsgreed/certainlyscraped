@@ -1,0 +1,34 @@
+# blocket.se classifieds (Swedish marketplace).
+#
+# Verified 2026-11-01: 3 pages, tier 1, no proxies, 86 unique rows.
+#   certainlyscraped run examples/blocket.yaml --out blocket.csv
+#
+# Two things to know about this site:
+#
+# 1. The canonical path matters. /annonser/hela_sverige?q=cykel ignores &page=
+#    and serves page 1 again, while /annonser/hela_sverige/cykel?page=2
+#    advances. That is why the URL below is a path and not a query string.
+# 2. There is no next-page link to follow, so pagination is a URL template.
+#    Blocket repeats ads across pages: page 2 adds ~31 new rows and page 3
+#    adds almost nothing, so two pages is where this stops being useful.
+name: blocket-annonser
+url: "https://www.blocket.se/annonser/hela_sverige/cykel"
+tier: 1
+max_pages: 2
+rate_limit_sec: 2.0
+
+paginate:
+  url: "https://www.blocket.se/annonser/hela_sverige/cykel?page={page}"
+
+items:
+  selector: "article.sf-search-ad"
+
+fields:
+  title:    { selector: "h2", attr: text }
+  url:      { selector: "a.sf-search-ad-link", attr: href, absolute: true }
+  price:    { selector: "div.font-bold.whitespace-nowrap span", attr: text, type: float }
+  location: { selector: "span.truncate", attr: text }
+  date:     { selector: "div.s-text-subtle span:last-child", attr: text }
+  image:    { selector: "img.sf-ad-carousel-desktop-item--active", attr: src }
+
+output: csv

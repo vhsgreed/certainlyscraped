@@ -66,12 +66,24 @@ def follow_links(fetch_page, base_url: str, cfg: dict, on_page,
                       file=log)
             break
         pages += 1
-        rows = on_page(fetched.html, url) or 0
+        counted = on_page(fetched.html, url)   # None when the caller does not count
+        rows = counted or 0
         outcomes.append(outcome_for(url, fetched, verdict, rows=rows,
                                     note=fetched.note or None))
 
         if not pag:
             break
+        if pag.get("url"):
+            # Some listings render no next-page anchor at all (Blocket,
+            # Tradera): the list is addressable only by page number. Walk the
+            # template instead of hunting for a link that is not there.
+            if counted == 0:
+                break                      # past the end of the list
+            url = urljoin(base_url, pag["url"].replace("{page}", str(pages + 1)))
+            if url in seen:
+                break
+            seen.add(url)
+            continue
         soup = BeautifulSoup(fetched.html, "html.parser")
         sel = pag.get("selector")
         attr = pag.get("attribute", "href")
@@ -108,8 +120,9 @@ def paginate(get_html, base_url: str, cfg: dict, on_page, log=None) -> int:
         return PageFetch(status=status, html=html)
 
     def handle_page(html, url):
-        on_page(html)
-        return 0
+        # Pass the caller's row count through: the URL-template walk stops on
+        # a page with no rows, and a callback that counts nothing is None.
+        return on_page(html)
 
     outcomes = follow_links(fetch_page, base_url, cfg, handle_page, log=log)
     return sum(1 for o in outcomes if o.status < 400)

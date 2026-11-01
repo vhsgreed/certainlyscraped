@@ -4,6 +4,29 @@ All notable changes to this project are documented here. Version 0.4.0 is the
 first release under the name `certainlyscraped`; earlier releases shipped as
 `scrapeforge`.
 
+## [0.4.5] - 2026-11-01
+
+### Added
+
+- `paginate.url`: a page-number template for lists that render no next-page
+  link (`...?page={page}`). The walk stops on a page that adds no rows, on
+  `max_pages`, or when the URL repeats, and asks for one page past the end
+  because a numbered list cannot announce itself.
+- `examples/tradera.yaml` and `examples/blocket.yaml`, both verified against
+  the live sites, plus `tests/test_examples.py` so a shipped example that stops
+  loading fails CI instead of a new user.
+
+### Fixed
+
+- `init --out some/new/dir/x.yaml` raised a traceback when the directory did
+  not exist. It creates it.
+
+### Notes
+
+- Both new examples document a site that defeats the obvious approach:
+  Tradera ignores `?page=N`, and Blocket only pages on its canonical path
+  (`/hela_sverige/cykel?page=2`), not on `?q=`. Their max_pages reflect that.
+
 ## [0.4.4] - 2026-11-01
 
 ### Added

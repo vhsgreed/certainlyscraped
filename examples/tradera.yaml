@@ -1,0 +1,30 @@
+# tradera.com search results (Swedish auction site).
+#
+# Verified 2026-11-01: 80 items, tier 1, no proxies.
+#   certainlyscraped run examples/tradera.yaml --out tradera.csv
+#
+# Tradera's cards carry data-* attributes (data-item-card-id, data-testid),
+# which survive their CSS-in-JS rebuilds. Prefer those over class names: their
+# classes look like ihfzoa_itemCard and change without notice.
+#
+# max_pages is 1 on purpose: tradera ignores ?page=N (page 2 serves page 1's
+# items again), so a numbered walk would only repeat itself. Narrow the query
+# instead of paging.
+name: tradera-search
+url: "https://www.tradera.com/search?q=lego"
+tier: 1
+max_pages: 1
+rate_limit_sec: 2.0
+
+items:
+  selector: "div[data-item-card-id]"
+
+fields:
+  title:       { selector: "a[data-testid='item-card-image']", attr: title }
+  url:         { selector: "a[data-testid='item-card-image']", attr: href, absolute: true }
+  price:       { selector: "span[data-testid='price']", attr: text, type: float }
+  price_label: { selector: "span[data-testid='bids-label']", attr: text }   # "Utropspris" or "Ledande bud"
+  ends_at:     { selector: "span[id$='-time'] span[aria-hidden='true']", attr: text }
+  image:       { selector: "picture img", attr: src }
+
+output: csv

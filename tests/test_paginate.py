@@ -84,3 +84,52 @@ def test_follow_links_trailing_404_is_not_found():
     assert [o.outcome for o in outcomes] == ["ok", "not_found"]
     assert outcomes[1].status == 404
     assert outcomes[1].url == "https://s/missing"
+
+URL_CFG = {"max_pages": 10, "rate_limit_sec": 0,
+           "paginate": {"url": "https://s/list?page={page}"}}
+
+
+def _rows(_html):
+    return 20
+
+
+def test_url_template_paginates_a_list_that_has_no_next_link():
+    # Blocket renders no next-page anchor: the list is addressable by page
+    # number and nothing else. Without this the walk stops at one page.
+    pages = {"https://s/list": "a", "https://s/list?page=2": "b",
+             "https://s/list?page=3": "c"}
+    get_html, fetched = _site(pages)
+    n = paginate(get_html, "https://s/list", URL_CFG, _rows)
+    # It asks for the page after the last one, gets the 404 and stops: there is
+    # no way to know a numbered list ended without asking once.
+    assert fetched == [*pages, "https://s/list?page=4"]
+    assert n == 3
+
+
+def test_url_template_stops_at_max_pages():
+    pages = {"https://s/list": "x"}
+    pages.update({f"https://s/list?page={i}": "x" for i in range(2, 20)})
+    get_html, fetched = _site(pages)
+    n = paginate(get_html, "https://s/list", dict(URL_CFG, max_pages=3), _rows)
+    assert n == 3 and len(fetched) == 3
+
+
+def test_url_template_stops_when_a_page_yields_no_rows():
+    # A page past the end comes back 200 with nothing on it: stop rather than
+    # walk to max_pages against a site that has nothing left to give.
+    pages = {"https://s/list": "a", "https://s/list?page=2": "b",
+             "https://s/list?page=3": "c"}
+    get_html, fetched = _site(pages)
+    rows = {"a": 20, "b": 0}          # the callback sees the HTML, not the URL
+    n = paginate(get_html, "https://s/list", URL_CFG, lambda h: rows.get(h, 0))
+    assert fetched == ["https://s/list", "https://s/list?page=2"] and n == 2
+
+
+def test_url_template_keeps_the_query_string_of_the_template():
+    cfg = {"max_pages": 2, "rate_limit_sec": 0,
+           "paginate": {"url": "/search?q=cykel&page={page}"}}
+    pages = {"https://s/search?q=cykel": "a",
+             "https://s/search?q=cykel&page=2": "b"}
+    get_html, fetched = _site(pages)
+    paginate(get_html, "https://s/search?q=cykel", cfg, _rows)
+    assert fetched == list(pages)

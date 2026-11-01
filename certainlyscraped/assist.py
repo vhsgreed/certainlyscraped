@@ -6,6 +6,7 @@ import json
 import os
 import re
 import sys
+from pathlib import Path
 from urllib.parse import urlparse
 
 from .extract import extract_page
@@ -180,6 +181,7 @@ def run_init(args) -> None:
     cfg = {"items": s.items, "fields": s.fields}
     rows = extract_page(html, cfg, url)
     text = render_config(name, url, tier if is_web else "auto", s, rows)
+    Path(out).parent.mkdir(parents=True, exist_ok=True)
     with open(out, "w", encoding="utf-8") as f:
         f.write(text)
 

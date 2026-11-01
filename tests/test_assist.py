@@ -93,6 +93,13 @@ def test_init_writes_a_config_that_runs(tmp_path, capsys):
     assert len(res.rows) == 6
 
 
+def test_init_creates_missing_directories(tmp_path):
+    # A traceback on `--out some/new/dir/x.yaml` is not a user error.
+    out = tmp_path / "nested" / "deeper" / "books.yaml"
+    cli.main(["init", os.path.join(FIX, "books.html"), "--out", str(out)])
+    assert out.exists() and yaml.safe_load(out.read_text())["items"]["selector"]
+
+
 def test_init_refuses_to_overwrite(tmp_path):
     out = tmp_path / "x.yaml"
     out.write_text("keep me")

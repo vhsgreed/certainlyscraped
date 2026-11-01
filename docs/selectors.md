@@ -133,6 +133,32 @@ fields:
 
 Paths are dotted keys. A number indexes a list (`images.0`), and `*` fans out over a list or object (`itemListElement.*.item`). `certainlyscraped init --json` builds this kind of config for you.
 
+## Pagination
+
+Two shapes, and a list uses one or the other:
+
+```yaml
+# 1. Follow the next-page link (most sites)
+paginate:
+  selector: "li.next a"
+
+# 2. Fill a page number into a URL, for lists with no next link
+paginate:
+  url: "https://www.blocket.se/annonser/hela_sverige/cykel?page={page}"
+```
+
+The template starts at page 2 and stops when a page adds no rows, when
+`max_pages` is reached, or when the URL repeats. It asks for one page past the
+end once, because a numbered list has no other way of saying "that was the
+last one".
+
+Use a template when the site renders pagination with JavaScript, when the next
+link is a `<w-pagination>` element or a number, or when `pageprobe` shows the
+numbered URL advances and the link does not. Do not use it when the site
+ignores the page parameter: fetching `?page=2` and getting page 1's items back
+means the walk will repeat itself, and the honest answer there is
+`max_pages: 1` plus a narrower query.
+
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
@@ -144,3 +170,4 @@ Paths are dotted keys. A number indexes a list (`images.0`), and `*` fans out ov
 | a field is empty but visible | the value is in an attribute | `attr: title`, `attr: content`, `attr: data-…` |
 | a price reads 1.299 instead of 1299 | European number format | add `decimal: ","` to the field |
 | page 2 is missing | no `paginate:` block, or the wrong next-link selector | `try <url> "a[rel~=next]"`; `pageprobe` certifies it advances |
+| page 2 repeats page 1 | the site ignores the page parameter | `max_pages: 1`, and narrow the query instead |

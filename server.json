@@ -7,18 +7,18 @@
     "url": "https://github.com/vhsgreed/certainlyscraped",
     "source": "github"
   },
-  "version": "0.4.4",
+  "version": "0.4.5",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "certainlyscraped",
-      "version": "0.4.4",
+      "version": "0.4.5",
       "runtimeHint": "uvx",
       "runtimeArguments": [
         {
           "type": "named",
           "name": "--from",
-          "value": "certainlyscraped[mcp]==0.4.4"
+          "value": "certainlyscraped[mcp]==0.4.5"
         }
       ],
       "packageArguments": [

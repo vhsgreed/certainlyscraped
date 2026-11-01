@@ -20,7 +20,8 @@ targets:
   - { group: marketplaces, name: aliexpress-search, url: "https://www.aliexpress.com/w/wholesale-led-strip.html" }
   - { group: marketplaces, name: temu-search, url: "https://www.temu.com/search_result.html?search_key=usb+cable" }
   - { group: marketplaces, name: prisjakt, url: "https://www.prisjakt.nu/" }
-  - { group: marketplaces, name: blocket-annonser, url: "https://www.blocket.se/annonser/hela_sverige?q=cykel" }
+  - { group: marketplaces, name: blocket-annonser, url: "https://www.blocket.se/annonser/hela_sverige/cykel" }
+  - { group: marketplaces, name: tradera-search, url: "https://www.tradera.com/search?q=lego" }
   - { group: marketplaces, name: hemnet-bostader, url: "https://www.hemnet.se/bostader" }
 
   # --- social: the ones people ask for first, and the ones that say no -----
