@@ -86,6 +86,31 @@ results still vary (Indeed 403 through both HTTP proxy tiers, Google still
 certainlyscraped. Tier 3 with a good residential proxy is the only reliable answer
 for the hardest walls, and even that is an ongoing arms race.
 
+## Swept 2026-11-01 (0.4.3, home IP, Europe/Stockholm)
+
+Each row is one run of the published package: `probe`, then `init`, then `run`
+for one page. "init" means the generated config extracted rows without edits.
+This is what the ladder did on the day, not what it should do.
+
+| Target | Probe tier | One page | Rows | What happened |
+|---|---|---|---|---|
+| books.toscrape.com | 1 | `t1` | 20 | clean; generated config worked unedited |
+| quotes.toscrape.com | 1 | `t1` | 10 | clean |
+| quotes.toscrape.com/js/ | 1 | `t1` | 10 | quotes live in embedded JSON; read without a browser |
+| news.ycombinator.com | 1 | `t1` | 30 | honest user agent gets 200 |
+| lobste.rs | 1 | `t1` | 25 | clean |
+| www.python.org | 1 | n/a | 0 | a homepage has no repeated item blocks; `init` says so |
+| github.com/trending | 1 | `t1` | 14 | probe ignored the word "captcha" (weak marker), page was real |
+| www.reddit.com/r/programming | 2 | n/a | 0 | tier 2 gets 167 KB of shell, zero items: it is a JavaScript app |
+| www.aliexpress.com search | 1 | `t1` | 1 | `init` found a weak block; generated selectors rot fast here |
+| boards.4chan.org/g/catalog | 2 | `t2` | 3 | tier 1 was walled, climbed to tier 2 on its own |
+| www.imdb.com/chart/top | 3 | n/a | 0 | HTTP 202 challenge; tier 3 deps not installed, reported as such |
+| www.ebay.com search | 3 | n/a | 0 | HTTP 403; probe said tier 3, the home IP is burned for eBay |
+
+Two things this sweep shows that the docs elsewhere say, now with dates: a
+tier-2 probe can still be a JavaScript app (Reddit), and a site that needs
+tier 3 usually needs a proxy more than a browser (eBay).
+
 ## Tier-3 tooling status (tested 2026-08-29)
 
 | Tool | Result | Note |
