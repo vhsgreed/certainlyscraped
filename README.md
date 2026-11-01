@@ -24,23 +24,21 @@ fields and the next-page link, and prints how many items each field filled.
 `run` fetches the pages, writes `out.csv`, and fails loudly if it gets fewer
 rows than `--min-rows` (default 1) instead of reporting success.
 
-For an agent, the same install already includes the MCP server:
-
-```bash
-pip install "certainlyscraped[mcp]"
-certainlyscraped mcp
-```
+For an agent, add the MCP server to your client. With [uv](https://docs.astral.sh/uv/)
+there is nothing to install first:
 
 ```json
 {
   "mcpServers": {
     "certainlyscraped": {
-      "command": "certainlyscraped",
-      "args": ["mcp"]
+      "command": "uvx",
+      "args": ["--from", "certainlyscraped[mcp]", "certainlyscraped", "mcp"]
     }
   }
 }
 ```
+
+Without uv, `pip install "certainlyscraped[mcp]"` and use `"command": "certainlyscraped", "args": ["mcp"]`.
 
 That gives the agent `probe`, `init`, `try_selector` and `scrape`; the full
 contract is under [MCP server (for agents)](#mcp-server-for-agents).
@@ -349,3 +347,5 @@ python -m pytest -q
 Tests run offline against saved pages in `tests/fixtures/`. CI runs them on
 Python 3.11 to 3.14. The live check runs the examples against real sites daily.
 MIT licensed. Part of the [vhsgreed](https://vhsgreed.win) toolset.
+
+<!-- mcp-name: io.github.vhsgreed/certainlyscraped -->
